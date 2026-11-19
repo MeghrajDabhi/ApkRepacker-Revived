@@ -4,8 +4,8 @@ name: Build and release
 # Setup (one time, about five minutes): docs/RELEASING.md
 
 on:
-  push:
-    branches: [main]
+  # Signed release publishing is manual until repository signing secrets are configured.
+  # Every source push is validated by android-build.yml, which creates a debug APK artifact.
   workflow_dispatch:
 
 # Releases are published one at a time and never cancelled half-way.
