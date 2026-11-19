@@ -148,42 +148,25 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .toString()
     }
 
-    private fun target(relative: String): File {
-        require(relative.isNotBlank()) { "A project-relative path is required. Use an exact path from list_project_files." }
-        val normalized = relative.trim().trim('`','"','\\'').replace('\\\\','/')
-            .removePrefix("./").trim('/')
-        require(normalized.isNotBlank() && !normalized.startsWith("/") &&
-            !Regex("^[A-Za-z]:").containsMatchIn(normalized)) {
-            "Only project-relative paths are allowed."
+    /**
+     * Resolve relative paths and absolute paths already inside the selected workspace.
+     * The model often repeats project_root from inspect_project; rejecting that safe
+     * absolute path caused a misleading "folder not found" error. Canonical containment
+     * still blocks ../ traversal and symlink escapes.
+     */
+    private fun target(rawPath: String): File {
+        require(rawPath.isNotBlank()) { "A project-relative path is required." }
+        val cleaned = rawPath.trim().replace('\\', '/')
+        val candidate = if (File(cleaned).isAbsolute || Regex("^[A-Za-z]:/").containsMatchIn(cleaned)) {
+            File(cleaned)
+        } else {
+            File(project, cleaned)
         }
-        val rawParts = normalized.split('/').filter { it.isNotBlank() && it != "." }
-        require(rawParts.none { it == ".." }) { "Parent-directory traversal is not allowed." }
-        var current = project
-        val parts = if (rawParts.firstOrNull()?.equals(project.name,true) == true) rawParts.drop(1) else rawParts
-        for (part in parts) {
-            val children = current.listFiles()
-                ?: error("Cannot enumerate '${current.relativeTo(project).invariantSeparatorsPath}'. Android denied access or the folder is unavailable.")
-            val exact = children.firstOrNull { it.name == part }
-            val match = exact ?: children.filter { it.name.equals(part,true) }.let { matches ->
-                when (matches.size) {
-                    0 -> null
-                    1 -> matches[0]
-                    else -> error("Ambiguous path segment '$part'. Use exact spelling from the directory listing: " +
-                        matches.joinToString { it.name })
-                }
-            }
-            if (match == null) {
-                val suggestions = children.sortedBy { it.name.lowercase() }.take(16)
-                    .joinToString { (if (it.isDirectory) "[DIR] " else "") + it.name }
-                error("Path '$relative' was not found under '${current.relativeTo(project).invariantSeparatorsPath}'. " +
-                    "Actual entries here: " + suggestions + ". Use an exact path from list_project_files.")
-            }
-            require(!java.nio.file.Files.isSymbolicLink(match.toPath())) { "Symbolic-link paths are not followed." }
-            current = match
-        }
-        val file = current.canonicalFile
-        require(file.toPath().startsWith(project.toPath()) && file != project) {
-            "Rejected path outside the selected project."
+        val file = candidate.canonicalFile
+        val rootPath = project.canonicalFile.toPath()
+        val resolvedPath = file.toPath()
+        require(resolvedPath != rootPath && resolvedPath.startsWith(rootPath)) {
+            "Rejected path outside the selected project: $rawPath"
         }
         return file
     }
@@ -532,7 +515,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
     private fun applyPatch(relative: String, oldText: String, newText: String): String {
         require(oldText.isNotEmpty() && oldText != newText) { "Patch must contain a non-empty old_text and a different new_text." }
         val file = target(relative)
-        require(isText(file)) { "Target must be an existing readable text file under 2 MB." }
+        require(isText(file)) { "Target must be an existing readable text file under 8 MB." }
         val before = file.readText(Charsets.UTF_8)
         val at = before.indexOf(oldText)
         require(at >= 0) { "Patch context was not found in $relative. Read the latest file and retry." }
