@@ -43,6 +43,14 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             objSchema(JSONObject().put("path",str("Project-relative existing text file path."))
                 .put("old_text",str("Exact existing text to replace; it must occur exactly once."))
                 .put("new_text",str("Replacement text.")), JSONArray().put("path").put("old_text").put("new_text"))))
+        tools.put(function("apply_multi_file_patches","Apply exact patches to multiple existing files in one transaction. All paths and old text are validated before any file changes; if validation fails, nothing is changed.",
+            objSchema(JSONObject().put("patches",JSONObject().put("type","array").put("items",
+                JSONObject().put("type","object").put("properties",
+                    JSONObject().put("path",str("Project-relative file path."))
+                        .put("old_text",str("Exact unique text to replace."))
+                        .put("new_text",str("Replacement text."))
+                ).put("required",JSONArray().put("path").put("old_text").put("new_text")))),
+                JSONArray().put("patches"))))
         tools.put(function("create_project_file","Create a new text file. Existing files are never overwritten.",
             objSchema(JSONObject().put("path",str("New project-relative file path."))
                 .put("content",str("Complete new file content.")), JSONArray().put("path").put("content"))))
@@ -86,6 +94,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "search_project_files" -> searchFiles(args.optString("query",""))
             "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",250))
             "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
+        "apply_multi_file_patches" -> applyMultiFilePatches(args.optJSONArray("patches") ?: JSONArray())
             "create_project_file" -> createFile(args.optString("path",""),args.optString("content",""))
             "delete_project_file" -> deleteFile(args.optString("path",""))
             "build_project" -> buildProject(args.optBoolean("force",false))
@@ -243,6 +252,39 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val after = before.replaceRange(at,at+oldText.length,newText)
         atomicWrite(file,after)
         return JSONObject().put("ok",true).put("path",relative).put("changed_chars",kotlin.math.abs(after.length-before.length)).toString()
+    }
+
+    private data class AgentPatchPlan(val path: String, val file: File, val before: String, val after: String)
+
+    private fun applyMultiFilePatches(patches: JSONArray): String {
+        require(patches.length() in 1..20) { "Provide between 1 and 20 file patches." }
+        val plans = mutableListOf<AgentPatchPlan>()
+        val seen = hashSetOf<String>()
+        for (i in 0 until patches.length()) {
+            val item = patches.optJSONObject(i) ?: error("Patch item " + i + " is invalid.")
+            val relative = item.optString("path")
+            val oldText = item.optString("old_text")
+            val newText = item.optString("new_text")
+            require(oldText.isNotEmpty() && oldText != newText) { "Patch for " + relative + " must contain different non-empty old_text and new_text." }
+            val file = target(relative)
+            require(isText(file)) { "Patch target is not a readable text file: " + relative }
+            val normalized = file.relativeTo(project).invariantSeparatorsPath
+            require(seen.add(normalized)) { "Only one patch per file is allowed in one transaction. Combine patches for " + normalized + "." }
+            val before = file.readText(Charsets.UTF_8)
+            val at = before.indexOf(oldText)
+            require(at >= 0) { "Patch context not found in " + normalized + ". Read the latest file and retry; no files have been changed." }
+            require(before.indexOf(oldText, at + 1) < 0) { "Patch context is not unique in " + normalized + ". Add more surrounding lines; no files have been changed." }
+            plans.add(AgentPatchPlan(normalized, file, before, before.replaceRange(at, at + oldText.length, newText)))
+        }
+        plans.forEach { backup(it.file) }
+        try {
+            plans.forEach { atomicWrite(it.file, it.after) }
+        } catch (e: Exception) {
+            plans.forEach { runCatching { atomicWrite(it.file, it.before) } }
+            throw IllegalStateException("Multi-file patch failed; transaction restored. " + (e.message ?: ""), e)
+        }
+        return JSONObject().put("ok", true).put("files_changed", plans.size)
+            .put("paths", JSONArray(plans.map { it.path })).toString()
     }
 
     private fun createFile(relative: String, content: String): String {
