@@ -62,6 +62,8 @@
         <activity
             android:name=".activity.BaseActivity"
             android:exported="false" />
+        <activity android:name=".activity.MeghrajAiSettingsActivity" android:exported="false" />
+        <activity android:name=".activity.MeghrajAiActivity" android:exported="false" />
         <activity
             android:name=".activity.AppEditorActivity"
             android:exported="false"
