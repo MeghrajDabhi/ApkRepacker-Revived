@@ -21,7 +21,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
     private lateinit var provider: Spinner
     private lateinit var key: TextInputEditText
     private lateinit var baseUrl: TextInputEditText
-    private lateinit var models: Spinner
+    private lateinit var models: AutoCompleteTextView
     private lateinit var status: TextView
     private val modelIds = mutableListOf<String>()
     private val providers = listOf("OpenRouter", "AgentRouter", "Gemini", "DeepSeek", "OpenAI", "Anthropic", "Groq", "Mistral", "Together AI", "Fireworks AI", "Cerebras", "NVIDIA NIM", "Custom")
@@ -72,17 +72,21 @@ class MeghrajAiSettingsActivity : BaseActivity() {
         val credentialsBox = LinearLayout(this).apply { orientation = 1; setPadding(dp(16), dp(14), dp(16), dp(14)) }
         credentialsBox.addView(sectionTitle("Credentials"))
         key = field("API key", true).also { it.setText(AiConfig.getKey(this)) }
-        credentialsBox.addView(key.parent as View)
+        credentialsBox.addView(key.tag as View)
         baseUrl = field("API base URL", false).also { it.setText(AiConfig.getBaseUrl(this)) }
-        credentialsBox.addView(baseUrl.parent as View)
+        credentialsBox.addView(baseUrl.tag as View)
         credentialsCard.addView(credentialsBox)
         content.addView(credentialsCard, cardParams())
 
         val modelCard = card()
         val modelBox = LinearLayout(this).apply { orientation = 1; setPadding(dp(16), dp(14), dp(16), dp(14)) }
         modelBox.addView(sectionTitle("Model"))
-        models = Spinner(this)
-        modelBox.addView(models)
+        models = AutoCompleteTextView(this).apply {
+            hint = "Search models by name or provider ID"
+            threshold = 1
+            setSingleLine(true)
+        }
+        modelBox.addView(models, LinearLayout.LayoutParams(-1, dp(54)))
         modelCard.addView(modelBox)
         content.addView(modelCard, cardParams())
 
@@ -100,7 +104,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
             text = "Save provider settings"
             setIconResource(com.riyadm.apkrepacker.R.drawable.ic_meghraj_ai)
             setOnClickListener {
-                val selected = models.selectedItemPosition.takeIf { it in modelIds.indices }?.let { modelIds[it] }
+                val selected = models.text?.toString()?.trim().takeUnless { it.isNullOrBlank() }
                     ?: AiConfig.getModel(this@MeghrajAiSettingsActivity)
                 AiConfig.save(this@MeghrajAiSettingsActivity, key.text?.toString().orEmpty().trim(), selected,
                     providers[provider.selectedItemPosition], baseUrl.text?.toString().orEmpty().trim())
@@ -126,7 +130,8 @@ class MeghrajAiSettingsActivity : BaseActivity() {
         val savedModel = AiConfig.getModel(this)
         if (savedModel.isNotBlank()) {
             modelIds.add(savedModel)
-            models.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, modelIds)
+            models.setAdapter(ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, modelIds))
+            models.setText(savedModel, false)
         }
     }
 
@@ -198,9 +203,10 @@ class MeghrajAiSettingsActivity : BaseActivity() {
                 if (ids.isEmpty()) error("No models were returned for this key.")
                 modelIds.clear()
                 modelIds.addAll(ids)
-                models.adapter = ArrayAdapter(this@MeghrajAiSettingsActivity, android.R.layout.simple_spinner_dropdown_item, modelIds)
+                models.setAdapter(ArrayAdapter(this@MeghrajAiSettingsActivity, android.R.layout.simple_dropdown_item_1line, modelIds))
                 val saved = AiConfig.getModel(this@MeghrajAiSettingsActivity)
-                models.setSelection(modelIds.indexOf(saved).coerceAtLeast(0))
+                models.setText(if (saved in modelIds) saved else modelIds.first(), false)
+                models.setOnClickListener { models.showDropDown() }
                 status.text = "Fetched ${ids.size} models. Select one and save."
             } catch (e: Exception) {
                 status.text = "Model fetch failed: ${e.message ?: e.javaClass.simpleName}"
