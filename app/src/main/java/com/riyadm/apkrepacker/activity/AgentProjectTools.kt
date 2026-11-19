@@ -35,7 +35,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             schema("path","Relative folder path; empty string means project root.")))
         tools.put(function("search_project_files","Search text content across decoded APK files. Returns bounded matching paths and line excerpts.",
             schema("query","Text, resource name, class, method, or identifier to search for.")))
-        tools.put(function("read_project_file","Read a specific project text file with line numbers. Read only files needed for the task.",
+        tools.put(function("read_project_file","Read a specific project text file with line numbers in chunks of at most 120 lines. The result includes has_more and next_start_line.",
             objSchema(JSONObject().put("path",str("Project-relative file path."))
                 .put("start_line",JSONObject().put("type","integer").put("description","1-based start line, defaults to 1."))
                 .put("end_line",JSONObject().put("type","integer").put("description","1-based end line, defaults to 250.")), JSONArray().put("path"))))
@@ -265,7 +265,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         require(isText(file)) { "File is missing, binary, or larger than 2 MB: $relative" }
         val lines = file.readLines(Charsets.UTF_8)
         val from = (start.coerceAtLeast(1)-1).coerceAtMost(lines.size)
-        val until = end.coerceAtLeast(start).coerceAtMost(from+300).coerceAtMost(lines.size)
+        val until = end.coerceAtLeast(start).coerceAtMost(from+120).coerceAtMost(lines.size)
         val body = (from until until).joinToString("\n") { i -> "${i+1}: ${lines[i]}" }
         val next = if (until < lines.size) until + 1 else JSONObject.NULL
         return JSONObject().put("ok",true).put("path",relative).put("total_lines",lines.size)
