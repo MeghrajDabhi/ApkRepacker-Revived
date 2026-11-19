@@ -3,6 +3,7 @@ package com.riyadm.apkrepacker.activity
 import android.os.Bundle
 import android.util.Log
 import android.view.View
+import android.content.Intent
 import androidx.activity.OnBackPressedCallback
 import androidx.fragment.app.Fragment
 import androidx.viewpager2.widget.ViewPager2
@@ -70,6 +71,13 @@ class AppEditorActivity : BaseActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
+        binding.toolbar.menu.add("✦ AI").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+        binding.toolbar.setOnMenuItemClickListener { item ->
+            if (item.title == "✦ AI") {
+                startActivity(Intent(this, MeghrajAiActivity::class.java).putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
+                true
+            } else false
+        }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         ProjectUtils.setProjectPath(path)
