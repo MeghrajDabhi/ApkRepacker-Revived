@@ -747,9 +747,9 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
             .put("contents", contents)
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", declarations)))
-            .put("generationConfig", JSONObject().put("temperature", 0.1).put("maxOutputTokens", 4096)
-                .put("toolConfig", JSONObject().put("functionCallingConfig",
-                    JSONObject().put("mode", if (requireToolCall) "ANY" else "AUTO"))))
+            .put("toolConfig", JSONObject().put("functionCallingConfig",
+                JSONObject().put("mode", if (requireToolCall) "ANY" else "AUTO")))
+            .put("generationConfig", JSONObject().put("temperature", 0.1).put("maxOutputTokens", 4096))
         val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
             ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
         val conn = URL(endpoint).openConnection() as HttpURLConnection
