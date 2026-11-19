@@ -57,8 +57,8 @@ class SettingsFragment : RevivedPreferenceFragment(),
         setPreferencesFromResource(R.xml.peference, rootKey)
         val aiPreference = Preference(requireContext()).apply {
             key = "meghraj_ai_settings"
-            title = "Meghraj AI"
-            summary = "Configure OpenRouter API key and choose an AI model"
+            title = "Agent"
+            summary = "Configure API provider, key and model"
             setOnPreferenceClickListener {
                 startActivity(android.content.Intent(requireContext(), com.riyadm.apkrepacker.activity.MeghrajAiSettingsActivity::class.java))
                 true
