@@ -73,16 +73,9 @@ class AppEditorActivity : BaseActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
-        val aiMenuItem = binding.toolbar.menu.add("Meghraj AI").apply {
-            setIcon(R.drawable.ic_meghraj_ai)
-            setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
-        }
-        binding.toolbar.setOnMenuItemClickListener { item ->
-            if (item === aiMenuItem) {
-                startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
-                    .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
-                true
-            } else false
+        binding.agentFab.setOnClickListener {
+            startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
+                .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
