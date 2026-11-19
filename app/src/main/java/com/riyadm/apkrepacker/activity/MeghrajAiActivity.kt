@@ -403,7 +403,7 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             val cycleStart = messages.length()
             status.text = "Agent thinking · step " + (completedToolCalls + 1) + " · " + provider
             val assistant = withContext(Dispatchers.IO) {
-                requestToolTurn(token, modelId, provider, baseUrl, messages, toolDefinitions)
+                requestToolTurn(token, modelId, provider, baseUrl, messages, toolDefinitions, completedToolCalls == 0)
             }
             messages.put(assistant)
             val calls = assistant.optJSONArray("tool_calls")
@@ -558,11 +558,11 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
 
     private fun requestToolTurn(
         token: String, modelId: String, provider: String, baseUrl: String,
-        messages: JSONArray, tools: JSONArray
+        messages: JSONArray, tools: JSONArray, requireToolCall: Boolean
     ): JSONObject = when (provider) {
-        "Anthropic" -> requestAnthropicToolTurn(token, modelId, baseUrl, messages, tools)
-        "Gemini" -> requestGeminiToolTurn(token, modelId, baseUrl, messages, tools)
-        else -> requestOpenAiToolTurn(token, modelId, provider, baseUrl, messages, tools)
+        "Anthropic" -> requestAnthropicToolTurn(token, modelId, baseUrl, messages, tools, requireToolCall)
+        "Gemini" -> requestGeminiToolTurn(token, modelId, baseUrl, messages, tools, requireToolCall)
+        else -> requestOpenAiToolTurn(token, modelId, provider, baseUrl, messages, tools, requireToolCall)
     }
 
     private fun requestOpenAiToolTurn(
@@ -571,10 +571,11 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         provider: String,
         baseUrl: String,
         messages: JSONArray,
-        tools: JSONArray
+        tools: JSONArray,
+        requireToolCall: Boolean
     ): JSONObject {
         val payload = JSONObject().put("model",modelId).put("messages",messages)
-            .put("tools",tools).put("tool_choice","auto")
+            .put("tools",tools).put("tool_choice",if (requireToolCall) "required" else "auto")
             .put("temperature",0.1).put("max_tokens",4096)
         val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
         val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -609,7 +610,8 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
     }
     
     private fun requestAnthropicToolTurn(
-        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray
+        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray,
+        requireToolCall: Boolean
     ): JSONObject {
         val system = messages.optJSONObject(0)?.optString("content").orEmpty()
         val apiMessages = JSONArray()
@@ -645,7 +647,7 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         }
         val payload = JSONObject().put("model", modelId).put("max_tokens", 4096).put("system", system)
             .put("messages", apiMessages).put("tools", anthropicTools)
-            .put("tool_choice", JSONObject().put("type", "auto"))
+            .put("tool_choice", JSONObject().put("type", if (requireToolCall) "any" else "auto"))
         val conn = URL(baseUrl.trim().trimEnd('/') + "/messages").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 20000
@@ -707,7 +709,8 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
     }
 
     private fun requestGeminiToolTurn(
-        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray
+        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray,
+        requireToolCall: Boolean
     ): JSONObject {
         val contents = JSONArray()
         var system = ""
@@ -746,7 +749,9 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
             .put("contents", contents)
             .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", declarations)))
-            .put("generationConfig", JSONObject().put("temperature", 0.1).put("maxOutputTokens", 4096))
+            .put("generationConfig", JSONObject().put("temperature", 0.1).put("maxOutputTokens", 4096)
+                .put("toolConfig", JSONObject().put("functionCallingConfig",
+                    JSONObject().put("mode", if (requireToolCall) "ANY" else "AUTO"))))
         val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
             ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
         val conn = URL(endpoint).openConnection() as HttpURLConnection
