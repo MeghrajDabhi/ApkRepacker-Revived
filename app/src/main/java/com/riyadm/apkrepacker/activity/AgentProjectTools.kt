@@ -208,7 +208,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         require(file.isFile && file.canRead()) { "File is missing or unreadable: $relative" }
         val offset = requestedOffset.coerceAtLeast(0L)
         require(offset < file.length() || (offset == 0L && file.length() == 0L)) { "Byte offset is past end of file." }
-        val length = requestedLength.coerceIn(1,8192).coerceAtMost((file.length()-offset).coerceAtLeast(0L).toInt())
+        val length = minOf(requestedLength.coerceIn(1,8192).toLong(),(file.length()-offset).coerceAtLeast(0L)).toInt()
         val bytes = ByteArray(length)
         RandomAccessFile(file,"r").use { input ->
             input.seek(offset)
