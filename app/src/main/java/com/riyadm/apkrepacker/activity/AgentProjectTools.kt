@@ -2,7 +2,9 @@ package com.riyadm.apkrepacker.activity
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.util.Base64
 import java.io.FileInputStream
+import java.io.RandomAccessFile
 import com.riyadm.apkrepacker.apktool.ApktoolEngine
 import com.riyadm.apkrepacker.apktool.ApktoolLogListener
 import com.riyadm.apkrepacker.apktool.BuildOptions
@@ -51,8 +53,13 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             objSchema(JSONObject().put("path",str("Project-relative file path."))
                 .put("start_line",JSONObject().put("type","integer").put("description","1-based start line, defaults to 1."))
                 .put("end_line",JSONObject().put("type","integer").put("description","1-based end line, defaults to 80.")), JSONArray().put("path"))))
-        tools.put(function("inspect_project_file","Inspect ANY file type, including binary APK resources, images, fonts, DEX, ARSC, archives and unknown extensions. Returns exact path, size, MIME guess, SHA-256 and a safe hex header; it does not pretend binary bytes are text.",
+        tools.put(function("inspect_project_file","Inspect ANY file type, including binary APK resources, images, fonts, DEX, ARSC, archives and unknown extensions. Returns exact path, size, SHA-256 and a safe hex header.",
             objSchema(JSONObject().put("path",str("Exact project-relative file path from the inventory.")),JSONArray().put("path"))))
+        tools.put(function("read_project_binary_chunk","Read the raw bytes of ANY binary file in a bounded Base64 chunk. First call inspect_project_file to get its size. Repeat with next_offset until complete. Never decode binary bytes as UTF-8.",
+            objSchema(JSONObject().put("path",str("Exact project-relative file path."))
+                .put("offset",JSONObject().put("type","integer").put("description","Zero-based byte offset."))
+                .put("length",JSONObject().put("type","integer").put("description","Number of bytes, 1 to 8192; defaults to 4096.")),
+                JSONArray().put("path").put("offset"))))
         tools.put(function("apply_file_patch","Replace one exact unique text range in an existing file. Read it first. Repeat this tool for multi-file edits.",
             objSchema(JSONObject().put("path",str("Project-relative existing text file path."))
                 .put("old_text",str("Exact existing text to replace; it must occur exactly once."))
@@ -114,6 +121,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "search_project_files" -> searchFiles(args.optString("query",""))
             "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",80))
             "inspect_project_file" -> inspectProjectFile(args.optString("path",""))
+            "read_project_binary_chunk" -> readBinaryChunk(args.optString("path",""),args.optLong("offset",0L),args.optInt("length",4096))
             "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
         "apply_multi_file_patches" -> applyMultiFilePatches(args.optJSONArray("patches") ?: JSONArray())
             "create_project_file" -> createFile(args.optString("path",""),args.optString("content",""))
@@ -192,6 +200,26 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .put("text_candidate",isText(file)).put("sha256",digest.digest().joinToString("") { "%02x".format(it) })
             .put("header_hex",hex).put("header_ascii",printable).put("image",imageBounds)
             .put("note","Binary files are inventoried and fingerprinted without corrupting their bytes. Use a type-specific viewer or editor for binary modifications.")
+            .toString()
+    }
+
+    private fun readBinaryChunk(relative: String, requestedOffset: Long, requestedLength: Int): String {
+        val file = target(relative)
+        require(file.isFile && file.canRead()) { "File is missing or unreadable: $relative" }
+        val offset = requestedOffset.coerceAtLeast(0L)
+        require(offset < file.length() || (offset == 0L && file.length() == 0L)) { "Byte offset is past end of file." }
+        val length = requestedLength.coerceIn(1,8192).coerceAtMost((file.length()-offset).coerceAtLeast(0L).toInt())
+        val bytes = ByteArray(length)
+        RandomAccessFile(file,"r").use { input ->
+            input.seek(offset)
+            input.readFully(bytes)
+        }
+        val next = offset + length
+        return JSONObject().put("ok",true).put("path",relative).put("file_bytes",file.length())
+            .put("offset",offset).put("bytes_returned",length).put("has_more",next < file.length())
+            .put("next_offset",if(next < file.length()) next else JSONObject.NULL)
+            .put("base64",Base64.encodeToString(bytes,Base64.NO_WRAP))
+            .put("note","Raw binary bytes encoded as Base64. Continue from next_offset; do not interpret this as text.")
             .toString()
     }
 
