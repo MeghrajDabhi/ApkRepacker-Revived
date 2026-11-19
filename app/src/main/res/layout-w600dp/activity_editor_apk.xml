@@ -33,6 +33,18 @@
             app:tabMode="auto" />
     </com.google.android.material.appbar.AppBarLayout>
 
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/agent_fab"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="20dp"
+        android:text="Agent"
+        android:contentDescription="Open Agent assistant"
+        app:icon="@drawable/ic_meghraj_ai"
+        app:backgroundTint="?attr/colorSecondaryContainer"
+        app:elevation="8dp" />
+
     <androidx.viewpager2.widget.ViewPager2
         android:id="@+id/tab_pager"
         android:layout_width="match_parent"
