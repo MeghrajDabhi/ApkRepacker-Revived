@@ -187,6 +187,6 @@ Use the complete file index to identify correct existing source files. Only retu
     }
 
     companion object {
-        const val EXTRA_PROJECT_PATH = "meghraj_ai_project_path"
+        const val EXTRA_PROJECT_PATH = "projectPatch"
     }
 }
