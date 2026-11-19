@@ -347,13 +347,11 @@ class MeghrajAiActivity : BaseActivity() {
     private suspend fun runCodingAgent(
         token: String, modelId: String, provider: String, baseUrl: String, instruction: String
     ): String {
-        val compatibleProviders = setOf(
+        val supportedProviders = setOf(
             "OpenAI", "OpenRouter", "DeepSeek", "NVIDIA NIM", "Groq", "Mistral",
-            "Together AI", "Fireworks AI", "Cerebras", "AgentRouter", "Custom"
+            "Together AI", "Fireworks AI", "Cerebras", "AgentRouter", "Custom", "Anthropic", "Gemini"
         )
-        require(provider in compatibleProviders) {
-            "$provider is configured as a non-OpenAI-compatible API in this build. Select an OpenAI-compatible saved profile for tool execution."
-        }
+        require(provider in supportedProviders) { "Tool calling is not configured for provider " + provider + "." }
         val runtime = projectTools ?: AgentProjectTools(this, project).also { projectTools = it }
         val messages = JSONArray()
         messages.put(JSONObject().put("role", "system").put("content",
@@ -451,6 +449,15 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         }
 
     private fun requestToolTurn(
+        token: String, modelId: String, provider: String, baseUrl: String,
+        messages: JSONArray, tools: JSONArray
+    ): JSONObject = when (provider) {
+        "Anthropic" -> requestAnthropicToolTurn(token, modelId, baseUrl, messages, tools)
+        "Gemini" -> requestGeminiToolTurn(token, modelId, baseUrl, messages, tools)
+        else -> requestOpenAiToolTurn(token, modelId, provider, baseUrl, messages, tools)
+    }
+
+    private fun requestOpenAiToolTurn(
         token: String,
         modelId: String,
         provider: String,
@@ -493,6 +500,178 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         error(provider + " returned neither a final answer nor tool calls. The selected model may not support function calling.")
     }
     
+    private fun requestAnthropicToolTurn(
+        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray
+    ): JSONObject {
+        val system = messages.optJSONObject(0)?.optString("content").orEmpty()
+        val apiMessages = JSONArray()
+        for (i in 1 until messages.length()) {
+            val message = messages.getJSONObject(i)
+            when (message.optString("role")) {
+                "user" -> apiMessages.put(JSONObject().put("role", "user").put("content", message.optString("content")))
+                "assistant" -> {
+                    val blocks = JSONArray()
+                    message.optString("content").takeIf { it.isNotBlank() }?.let {
+                        blocks.put(JSONObject().put("type", "text").put("text", it))
+                    }
+                    val calls = message.optJSONArray("tool_calls")
+                    if (calls != null) for (j in 0 until calls.length()) {
+                        val call = calls.getJSONObject(j)
+                        val fn = call.getJSONObject("function")
+                        blocks.put(JSONObject().put("type", "tool_use").put("id", call.optString("id"))
+                            .put("name", fn.optString("name")).put("input", JSONObject(fn.optString("arguments", "{}"))))
+                    }
+                    apiMessages.put(JSONObject().put("role", "assistant").put("content", blocks))
+                }
+                "tool" -> apiMessages.put(JSONObject().put("role", "user").put("content", JSONArray().put(
+                    JSONObject().put("type", "tool_result").put("tool_use_id", message.optString("tool_call_id"))
+                        .put("content", message.optString("content")))))
+            }
+        }
+        val anthropicTools = JSONArray()
+        for (i in 0 until tools.length()) {
+            val fn = tools.getJSONObject(i).getJSONObject("function")
+            anthropicTools.put(JSONObject().put("name", fn.optString("name"))
+                .put("description", fn.optString("description"))
+                .put("input_schema", fn.optJSONObject("parameters") ?: JSONObject().put("type", "object")))
+        }
+        val payload = JSONObject().put("model", modelId).put("max_tokens", 4096).put("system", system)
+            .put("messages", apiMessages).put("tools", anthropicTools)
+            .put("tool_choice", JSONObject().put("type", "auto"))
+        val conn = URL(baseUrl.trim().trimEnd('/') + "/messages").openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 20000
+        conn.readTimeout = 120000
+        conn.doOutput = true
+        conn.setRequestProperty("x-api-key", token)
+        conn.setRequestProperty("anthropic-version", "2023-06-01")
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("Accept", "application/json")
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val response = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        conn.disconnect()
+        if (code !in 200..299) throw IllegalStateException(explainApiError("Anthropic", code, response))
+        val root = JSONObject(response)
+        val blocks = root.optJSONArray("content") ?: error("Anthropic returned no content.")
+        val calls = JSONArray()
+        val text = StringBuilder()
+        for (i in 0 until blocks.length()) {
+            val block = blocks.optJSONObject(i) ?: continue
+            when (block.optString("type")) {
+                "text" -> text.append(block.optString("text"))
+                "tool_use" -> calls.put(JSONObject().put("id", block.optString("id")).put("type", "function")
+                    .put("function", JSONObject().put("name", block.optString("name"))
+                        .put("arguments", block.optJSONObject("input")?.toString() ?: "{}")))
+            }
+        }
+        if (calls.length() == 0 && text.isBlank()) error("Anthropic returned neither text nor tool calls.")
+        return JSONObject().put("role", "assistant").put("content", text.toString())
+            .put("tool_calls", if (calls.length() > 0) calls else JSONObject.NULL)
+    }
+
+    private fun geminiSchema(source: JSONObject): JSONObject {
+        val result = JSONObject()
+        val keys = source.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            if (key == "additionalProperties") continue
+            val value = source.opt(key)
+            when (value) {
+                is JSONObject -> {
+                    if (key == "properties") {
+                        val props = JSONObject()
+                        val names = value.keys()
+                        while (names.hasNext()) {
+                            val name = names.next()
+                            value.optJSONObject(name)?.let { props.put(name, geminiSchema(it)) }
+                        }
+                        result.put(key, props)
+                    } else result.put(key, geminiSchema(value))
+                }
+                is JSONArray -> result.put(key, value)
+                is String -> result.put(key, if (key == "type") value.uppercase() else value)
+                else -> if (value != null) result.put(key, value)
+            }
+        }
+        return result
+    }
+
+    private fun requestGeminiToolTurn(
+        token: String, modelId: String, baseUrl: String, messages: JSONArray, tools: JSONArray
+    ): JSONObject {
+        val contents = JSONArray()
+        var system = ""
+        for (i in 0 until messages.length()) {
+            val message = messages.getJSONObject(i)
+            when (message.optString("role")) {
+                "system" -> system = message.optString("content")
+                "user" -> contents.put(JSONObject().put("role", "user")
+                    .put("parts", JSONArray().put(JSONObject().put("text", message.optString("content")))))
+                "assistant" -> {
+                    val parts = JSONArray()
+                    message.optString("content").takeIf { it.isNotBlank() }?.let {
+                        parts.put(JSONObject().put("text", it))
+                    }
+                    val calls = message.optJSONArray("tool_calls")
+                    if (calls != null) for (j in 0 until calls.length()) {
+                        val fn = calls.getJSONObject(j).getJSONObject("function")
+                        parts.put(JSONObject().put("functionCall", JSONObject().put("name", fn.optString("name"))
+                            .put("args", JSONObject(fn.optString("arguments", "{}")))))
+                    }
+                    contents.put(JSONObject().put("role", "model").put("parts", parts))
+                }
+                "tool" -> contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(
+                    JSONObject().put("functionResponse", JSONObject().put("name", message.optString("name"))
+                        .put("response", JSONObject().put("result", message.optString("content")))))))
+            }
+        }
+        val declarations = JSONArray()
+        for (i in 0 until tools.length()) {
+            val fn = tools.getJSONObject(i).getJSONObject("function")
+            declarations.put(JSONObject().put("name", fn.optString("name"))
+                .put("description", fn.optString("description"))
+                .put("parameters", geminiSchema(fn.optJSONObject("parameters") ?: JSONObject().put("type", "object"))))
+        }
+        val payload = JSONObject()
+            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+            .put("contents", contents)
+            .put("tools", JSONArray().put(JSONObject().put("functionDeclarations", declarations)))
+            .put("generationConfig", JSONObject().put("temperature", 0.1).put("maxOutputTokens", 4096))
+        val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
+            ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 20000
+        conn.readTimeout = 120000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("Accept", "application/json")
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val response = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        conn.disconnect()
+        if (code !in 200..299) throw IllegalStateException(explainApiError("Gemini", code, response))
+        val root = JSONObject(response)
+        val candidate = root.optJSONArray("candidates")?.optJSONObject(0) ?: error("Gemini returned no candidate.")
+        val parts = candidate.optJSONObject("content")?.optJSONArray("parts") ?: error("Gemini returned no parts.")
+        val calls = JSONArray()
+        val text = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            part.optString("text").takeIf { it.isNotBlank() }?.let { text.append(it) }
+            val call = part.optJSONObject("functionCall")
+            if (call != null) calls.put(JSONObject().put("id", "gemini-call-" + i + "-" + System.currentTimeMillis())
+                .put("type", "function").put("function", JSONObject().put("name", call.optString("name"))
+                    .put("arguments", call.optJSONObject("args")?.toString() ?: "{}")))
+        }
+        if (calls.length() == 0 && text.isBlank()) error("Gemini returned neither text nor function calls.")
+        return JSONObject().put("role", "assistant").put("content", text.toString())
+            .put("tool_calls", if (calls.length() > 0) calls else JSONObject.NULL)
+    }
+
     private fun rollbackAgentChanges() {
         val runtime = projectTools
         if (runtime == null) {
