@@ -353,6 +353,15 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             if (launcher) launcherClassNames.add(fullName)
             declarations.put(JSONObject().put("name",fullName).put("launcher",launcher))
         }
+        val publicResourceIds = linkedMapOf<String,String>()
+        val publicXml = File(project,"res/values/public.xml")
+        if (publicXml.isFile && publicXml.length() <= 4*1024*1024) {
+            val publicText = runCatching { publicXml.readText(Charsets.UTF_8) }.getOrDefault("")
+            Regex("<public\\b[^>]*type=[\\\"']layout[\\\"'][^>]*name=[\\\"']([^\\\"']+)[\\\"'][^>]*id=[\\\"'](0x[0-9a-fA-F]+)[\\\"'][^>]*/?>")
+                .findAll(publicText).forEach { match ->
+                    publicResourceIds[match.groupValues[2].lowercase()] = match.groupValues[1]
+                }
+        }
         val codeFiles = allFiles().filter {
             it.extension.lowercase() in setOf("smali","java","kt") && it.length() <= 2*1024*1024
         }.toList()
@@ -371,8 +380,24 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                 val relative = file.relativeTo(project).invariantSeparatorsPath
                 importantCodePaths.add(relative)
                 val source = runCatching { file.readText(Charsets.UTF_8) }.getOrDefault("")
-                val refs = Regex("R\\.layout\\.([A-Za-z0-9_]+)|R\\$layout;->([A-Za-z0-9_]+):I")
-                    .findAll(source).mapNotNull { it.groupValues.drop(1).firstOrNull { v -> v.isNotBlank() } }.toList()
+                val refs = linkedSetOf<String>()
+                Regex("R\\.layout\\.([A-Za-z0-9_]+)|R\\$layout;->([A-Za-z0-9_]+):I")
+                    .findAll(source).mapNotNull { it.groupValues.drop(1).firstOrNull { v -> v.isNotBlank() } }
+                    .forEach { refs.add(it) }
+                if (file.extension.equals("smali",true) && publicResourceIds.isNotEmpty()) {
+                    val lines = source.lines()
+                    for (lineIndex in lines.indices) {
+                        val line = lines[lineIndex]
+                        if (line.contains("setContentView") || line.contains("->inflate(")) {
+                            val from = (lineIndex-12).coerceAtLeast(0)
+                            for (previous in from..lineIndex) {
+                                Regex("const(?:/\\d+)?\\s+\\w+,\\s*(0x[0-9a-fA-F]+)")
+                                    .find(lines[previous])?.groupValues?.getOrNull(1)?.lowercase()
+                                    ?.let { publicResourceIds[it] }?.let { refs.add(it) }
+                            }
+                        }
+                    }
+                }
                 refs.forEach { referencedLayoutNames.add(it) }
                 resolved.put(JSONObject().put("activity",className).put("path",relative)
                     .put("launcher",launcherClassNames.contains(className))
