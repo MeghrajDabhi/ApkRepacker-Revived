@@ -24,7 +24,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
     private lateinit var models: Spinner
     private lateinit var status: TextView
     private val modelIds = mutableListOf<String>()
-    private val providers = listOf("OpenRouter", "OpenAI", "DeepSeek", "NVIDIA NIM", "AgentRouter", "Custom")
+    private val providers = listOf("OpenRouter", "AgentRouter", "Gemini", "DeepSeek", "OpenAI", "Anthropic", "Groq", "Mistral", "Together AI", "Fireworks AI", "Cerebras", "NVIDIA NIM", "Custom")
     private var lastAutoBase = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -168,7 +168,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
         lifecycleScope.launch {
             try {
                 val ids = withContext(Dispatchers.IO) {
-                    val endpoint = "$base/models"
+                    val endpoint = if (selectedProvider == "Gemini") "$base/v1beta/models?key=$token" else "$base/models"
                     val conn = URL(endpoint).openConnection() as HttpURLConnection
                     conn.requestMethod = "GET"
                     conn.connectTimeout = 15000
@@ -180,10 +180,20 @@ class MeghrajAiSettingsActivity : BaseActivity() {
                     val body = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
                     conn.disconnect()
                     if (code !in 200..299) error("HTTP $code from $endpoint: ${body.take(400)}")
-                    val data = JSONObject(body).optJSONArray("data") ?: error("Response has no OpenAI-compatible data[] model list.")
-                    (0 until data.length()).mapNotNull { i ->
-                        data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }
-                    }.distinct().sorted()
+                    val root = JSONObject(body)
+                    val found = if (selectedProvider == "Gemini") {
+                        val data = root.optJSONArray("models") ?: error("Gemini response has no models list.")
+                        (0 until data.length()).mapNotNull { i ->
+                            val item = data.optJSONObject(i) ?: return@mapNotNull null
+                            val methods = item.optJSONArray("supportedGenerationMethods")
+                            val supportsChat = methods != null && (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                            item.optString("name").removePrefix("models/").takeIf { it.isNotBlank() && supportsChat }
+                        }
+                    } else {
+                        val data = root.optJSONArray("data") ?: error("Response has no OpenAI-compatible data[] model list.")
+                        (0 until data.length()).mapNotNull { i -> data.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() } }
+                    }
+                    found.distinct().sorted()
                 }
                 if (ids.isEmpty()) error("No models were returned for this key.")
                 modelIds.clear()
