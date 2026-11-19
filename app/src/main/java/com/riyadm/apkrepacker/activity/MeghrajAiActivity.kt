@@ -574,6 +574,7 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
     ): JSONObject {
         val payload = JSONObject().put("model",modelId).put("messages",messages)
             .put("tools",tools).put("tool_choice",if (requireToolCall) "required" else "auto")
+            .put("parallel_tool_calls",false)
             .put("temperature",0.1).put("max_tokens",4096)
         val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
         val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -654,7 +655,8 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         }
         val payload = JSONObject().put("model", modelId).put("max_tokens", 4096).put("system", system)
             .put("messages", apiMessages).put("tools", anthropicTools)
-            .put("tool_choice", JSONObject().put("type", if (requireToolCall) "any" else "auto"))
+            .put("tool_choice", JSONObject().put("type", if (requireToolCall) "any" else "auto")
+                .put("disable_parallel_tool_use",true))
         val conn = URL(baseUrl.trim().trimEnd('/') + "/messages").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.connectTimeout = 20000
