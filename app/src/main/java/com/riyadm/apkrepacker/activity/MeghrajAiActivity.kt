@@ -399,9 +399,19 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                 }
                 status.text = summary + "..."
                 val approvalText = runtime.requiresApproval(name,args)
-                val approved = if (approvalText != null) confirmAgentAction(approvalText) else true
+                val approvalDetails = if (approvalText != null) {
+                    val preview = if (name == "apply_file_patch") {
+                        "\n\nFile: " + args.optString("path") +
+                            "\n\nBEFORE:\n" + args.optString("old_text").take(900) +
+                            "\n\nAFTER:\n" + args.optString("new_text").take(900)
+                    } else "\n\nFile: " + args.optString("path")
+                    approvalText + preview
+                } else null
+                val approved = if (approvalDetails != null) confirmAgentAction(approvalDetails) else true
                 val result = if (!approved) {
                     JSONObject().put("approved",false).put("message","User declined this action. Do not retry the same action; continue safely or explain the limitation.").toString()
+                } else if (name == "build_project" && buildAttempts >= 3) {
+                    JSONObject().put("success",false).put("error","Agent build retry limit reached (3 attempts). Stop building and report the remaining errors.").toString()
                 } else {
                     if (name == "build_project") buildAttempts++
                     withContext(Dispatchers.IO) { runtime.execute(name,args) }
