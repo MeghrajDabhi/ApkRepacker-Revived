@@ -357,9 +357,17 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val publicXml = File(project,"res/values/public.xml")
         if (publicXml.isFile && publicXml.length() <= 4*1024*1024) {
             val publicText = runCatching { publicXml.readText(Charsets.UTF_8) }.getOrDefault("")
-            Regex("<public\\b[^>]*type=[\\\"']layout[\\\"'][^>]*name=[\\\"']([^\\\"']+)[\\\"'][^>]*id=[\\\"'](0x[0-9a-fA-F]+)[\\\"'][^>]*/?>")
+            Regex("<public\\b([^>]*)/?>",RegexOption.IGNORE_CASE)
                 .findAll(publicText).forEach { match ->
-                    publicResourceIds[match.groupValues[2].lowercase()] = match.groupValues[1]
+                    val attributes = match.groupValues[1]
+                    fun attr(name: String): String = Regex("\\\\b" + Regex.escape(name) + "=[\\\"']([^\\\"']+)[\\\"']",RegexOption.IGNORE_CASE)
+                        .find(attributes)?.groupValues?.getOrNull(1).orEmpty()
+                    val type = attr("type")
+                    val name = attr("name")
+                    val id = attr("id")
+                    if (type.equals("layout",true) && name.isNotBlank() && id.matches(Regex("0x[0-9a-fA-F]+"))) {
+                        publicResourceIds[id.lowercase()] = name
+                    }
                 }
         }
         val codeFiles = allFiles().filter {
@@ -391,7 +399,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                         if (line.contains("setContentView") || line.contains("->inflate(")) {
                             val from = (lineIndex-12).coerceAtLeast(0)
                             for (previous in from..lineIndex) {
-                                Regex("const(?:/\\d+)?\\s+\\w+,\\s*(0x[0-9a-fA-F]+)")
+                                Regex("const(?:/(?:\\d+|high16))?\\s+\\w+,\\s*(0x[0-9a-fA-F]+)")
                                     .find(lines[previous])?.groupValues?.getOrNull(1)?.lowercase()
                                     ?.let { publicResourceIds[it] }?.let { refs.add(it) }
                             }
