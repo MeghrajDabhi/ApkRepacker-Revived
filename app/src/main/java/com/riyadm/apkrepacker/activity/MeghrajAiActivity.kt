@@ -39,6 +39,7 @@ class MeghrajAiActivity : BaseActivity() {
     private lateinit var profileSwitcher: Spinner
     private lateinit var pageScroll: ScrollView
     private var proposed: JSONObject? = null
+    private var projectTools: AgentProjectTools? = null
     private var requestInProgress = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -145,6 +146,12 @@ class MeghrajAiActivity : BaseActivity() {
             setOnClickListener { showIdeas() }
         }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) })
         content.addView(actions, marginParams(bottom = 8))
+        content.addView(MaterialButton(this).apply {
+            text = "Undo Agent changes"
+            isAllCaps = false
+            textSize = 12f
+            setOnClickListener { rollbackAgentChanges() }
+        }, marginParams(bottom = 12))
 
         val switchCard = card(color(com.google.android.material.R.attr.colorSurfaceContainerLow, surface))
         val switchBody = LinearLayout(this).apply {
@@ -347,7 +354,7 @@ class MeghrajAiActivity : BaseActivity() {
         require(provider in compatibleProviders) {
             "$provider is configured as a non-OpenAI-compatible API in this build. Select an OpenAI-compatible saved profile for tool execution."
         }
-        val runtime = AgentProjectTools(this, project)
+        val runtime = projectTools ?: AgentProjectTools(this, project).also { projectTools = it }
         val messages = JSONArray()
         messages.put(JSONObject().put("role", "system").put("content",
             """You are a coding agent operating on the user's selected, decoded Android APK project.
@@ -421,7 +428,7 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                 } else if (name == "delete_project_file" && approved) {
                     addMessage("agent", "FILE DELETED · " + args.optString("path") + " (backup retained).")
                 }
-                messages.put(JSONObject().put("role","tool").put("tool_call_id",callId).put("content",result))
+                messages.put(JSONObject().put("role","tool").put("tool_call_id",callId).put("name",name).put("content",result))
                 if (completedToolCalls >= 24) break
             }
             if (buildAttempts >= 3) {
@@ -486,6 +493,33 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         error(provider + " returned neither a final answer nor tool calls. The selected model may not support function calling.")
     }
     
+    private fun rollbackAgentChanges() {
+        val runtime = projectTools
+        if (runtime == null) {
+            status.text = "No Agent changes have been made in this session."
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Undo Agent changes?")
+            .setMessage("Restore project files to their state before this Agent session's edits?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Undo changes") { _, _ ->
+                lifecycleScope.launch {
+                    try {
+                        val result = withContext(Dispatchers.IO) {
+                            JSONObject(runtime.execute("rollback_last_changes", JSONObject()))
+                        }
+                        val summary = "Rollback complete · restored " + result.optInt("restored_files") +
+                            " file(s), removed " + result.optInt("removed_created_files") + " created file(s)."
+                        addMessage("agent", summary)
+                        status.text = summary
+                    } catch (e: Exception) {
+                        status.text = "Rollback failed · " + (e.message ?: e.javaClass.simpleName)
+                    }
+                }
+            }.show()
+    }
+
     private fun isProjectEditRequest(instruction: String): Boolean {
         val editWords = listOf(
             "add", "create", "implement", "build", "change", "modify", "edit", "remove",
