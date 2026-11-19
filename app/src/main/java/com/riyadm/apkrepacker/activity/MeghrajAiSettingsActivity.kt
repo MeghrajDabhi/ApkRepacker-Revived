@@ -156,7 +156,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
             if (secret) inputType = 129
             if (!secret) maxLines = 1
         }
-        wrap.addView(input, ViewGroup.LayoutParams(-1, -2))
+        wrap.addView(input, LinearLayout.LayoutParams(-1, -2))
         input.tag = wrap
         return input
     }
