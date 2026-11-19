@@ -73,22 +73,17 @@ class AppEditorActivity : BaseActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
-        val aiFab = FloatingActionButton(this).apply {
-            contentDescription = "Open Meghraj AI assistant"
-            setImageResource(android.R.drawable.ic_dialog_info)
-            textAlignment = View.TEXT_ALIGNMENT_CENTER
-            setOnClickListener {
+        val aiMenuItem = binding.toolbar.menu.add("Meghraj AI").apply {
+            setIcon(R.drawable.ic_meghraj_ai)
+            setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+        }
+        binding.toolbar.setOnMenuItemClickListener { item ->
+            if (item === aiMenuItem) {
                 startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
                     .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
-            }
+                true
+            } else false
         }
-        val fabParams = CoordinatorLayout.LayoutParams(
-            CoordinatorLayout.LayoutParams.WRAP_CONTENT, CoordinatorLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            gravity = android.view.Gravity.BOTTOM or android.view.Gravity.END
-            setMargins(0, 0, 24, 28)
-        }
-        binding.root.addView(aiFab, fabParams)
         onBackPressedDispatcher.addCallback(this, backCallback)
 
         ProjectUtils.setProjectPath(path)
