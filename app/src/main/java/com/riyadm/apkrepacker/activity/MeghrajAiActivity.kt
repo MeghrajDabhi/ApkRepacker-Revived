@@ -18,6 +18,9 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -267,7 +270,15 @@ class MeghrajAiActivity : BaseActivity() {
     }
 
     private fun addMessage(role: String, message: String) {
-        val assistant = role == "agent"
+        val assistant = role in setOf("agent","scout","engineer","reviewer","coordinator")
+        val speaker = when (role) {
+            "scout" -> "PROJECT SCOUT"
+            "engineer" -> "FEATURE ENGINEER"
+            "reviewer" -> "BUILD & SAFETY REVIEWER"
+            "coordinator" -> "LEAD COORDINATOR"
+            "agent" -> "AGENT"
+            else -> "YOU"
+        }
         val bubbleColor = if (assistant) color(com.google.android.material.R.attr.colorSurfaceContainer, Color.LTGRAY)
             else color(com.google.android.material.R.attr.colorPrimaryContainer, Color.LTGRAY)
         val bubble = card(bubbleColor).apply {
@@ -275,7 +286,7 @@ class MeghrajAiActivity : BaseActivity() {
             cardElevation = 0f
         }
         val text = TextView(this).apply {
-            this.text = (if (assistant) "AGENT\n" else "YOU\n") + message
+            this.text = speaker + "\n" + message
             textSize = 14f
             setTextColor(if (assistant) color(com.google.android.material.R.attr.colorOnSurface, Color.BLACK)
                 else color(com.google.android.material.R.attr.colorOnPrimaryContainer, Color.BLACK))
@@ -401,6 +412,31 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             "\nText files indexed: " + inspection.optInt("readable_text_files") +
             "\nTop-level folders: " + (rootListing.optJSONArray("directories")?.length() ?: 0) +
             "\nThe Agent has verified the selected project and can now inspect files.")
+        status.text = "Three AI specialists · investigating the project in parallel..."
+        addMessage("coordinator", "MULTI-AGENT TEAM STARTED\nThree specialists are analysing the same verified project snapshot in parallel. They cannot edit files. The lead agent will reconcile their findings before making any changes.")
+        val specialistContext = buildSpecialistContext(runtime, inspection, rootListing, instruction)
+        val specialistReports = runThreeAgentCouncil(
+            token, modelId, provider, baseUrl, instruction, specialistContext
+        )
+        specialistReports.forEach { (role, report) ->
+            addMessage(role, report)
+        }
+        val successfulReports = specialistReports.filter { !it.second.startsWith("SPECIALIST ERROR:") }
+        require(successfulReports.isNotEmpty()) {
+            "All three specialist agents failed. Check the provider/model tool and chat API configuration.\n" +
+                specialistReports.joinToString("\n") { it.first + ": " + it.second }
+        }
+        val sharedBrief = specialistReports.joinToString("\n\n") { (role, report) ->
+            "=== " + role.uppercase() + " REPORT ===\n" + report.take(5200)
+        }
+        messages.optJSONObject(1)?.put(
+            "content",
+            messages.optJSONObject(1)?.optString("content").orEmpty() +
+                "\n\nTHREE-SPECIALIST CONFERENCE RESULTS (read before using project tools):\n" +
+                sharedBrief +
+                "\n\nYou are the lead coordinator. Reconcile disagreements, verify all paths and claims with your own local tools, then perform the task. Specialists did not edit files."
+        )
+        addMessage("coordinator", "CONFERENCE COMPLETE · " + successfulReports.size + "/3 specialists reported. Lead agent is reconciling their findings and will control all file edits and the build.")
         val toolDefinitions = runtime.definitions()
         var completedToolCalls = 0
         var buildAttempts = 0
@@ -510,6 +546,131 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             }
         }
         return "This task reached the 96-action safety guard. This is not a project-access or API token error. The activity log records completed actions; applied edits have session backups. Start a follow-up task with 'continue the previous task' to finish any remaining work."
+    }
+
+    /**
+     * Build one bounded, verified snapshot for the independent specialists.
+     * The specialists never receive filesystem permissions or write tools.
+     */
+    private suspend fun buildSpecialistContext(
+        runtime: AgentProjectTools,
+        inspection: JSONObject,
+        rootListing: JSONObject,
+        instruction: String
+    ): String = withContext(Dispatchers.IO) {
+        val guiIndexRaw = runtime.execute("find_gui_files", JSONObject().put("task_hint", instruction))
+        val guiIndex = runCatching { JSONObject(guiIndexRaw) }.getOrDefault(JSONObject())
+        val candidates = guiIndex.optJSONArray("candidates")
+        val paths = linkedSetOf<String>()
+        listOf(
+            "AndroidManifest.xml",
+            "apktool.yml",
+            "res/values/colors.xml",
+            "res/values/styles.xml",
+            "res/values/themes.xml",
+            "res/values/strings.xml"
+        ).forEach { if (File(project, it).isFile) paths.add(it) }
+        if (candidates != null) {
+            for (i in 0 until minOf(candidates.length(), 12)) {
+                val path = candidates.optJSONObject(i)?.optString("path").orEmpty()
+                if (path.isNotBlank() && File(project, path).isFile) paths.add(path)
+                if (paths.size >= 8) break
+            }
+        }
+        val excerpts = JSONArray()
+        var remaining = 18000
+        for (path in paths.take(8)) {
+            if (remaining <= 0) break
+            val result = runCatching {
+                JSONObject(runtime.execute(
+                    "read_project_file",
+                    JSONObject().put("path", path).put("start_line", 1).put("end_line", 45)
+                ))
+            }.getOrNull() ?: continue
+            if (!result.optBoolean("ok", false)) continue
+            val body = result.optString("content").take(minOf(2600, remaining))
+            if (body.isBlank()) continue
+            excerpts.put(JSONObject().put("path", path)
+                .put("lines", result.optString("start_line") + "-" + result.optString("end_line"))
+                .put("content", body))
+            remaining -= body.length
+        }
+        val directoryPaths = inspection.optJSONArray("directory_paths") ?: JSONArray()
+        val compactDirs = JSONArray()
+        for (i in 0 until minOf(70, directoryPaths.length())) compactDirs.put(directoryPaths.opt(i))
+        val fileSample = inspection.optJSONArray("text_file_sample") ?: JSONArray()
+        val compactSample = JSONArray()
+        for (i in 0 until minOf(60, fileSample.length())) compactSample.put(fileSample.opt(i))
+        JSONObject()
+            .put("project_name", inspection.optString("project_name"))
+            .put("verified_root", inspection.optString("project_root"))
+            .put("total_files", inspection.optInt("total_project_files"))
+            .put("readable_text_files", inspection.optInt("readable_text_files"))
+            .put("manifest_exists", inspection.optBoolean("has_android_manifest"))
+            .put("apktool_yml_exists", inspection.optBoolean("has_apktool_metadata"))
+            .put("resource_directory_exists", inspection.optBoolean("has_resource_directory"))
+            .put("smali_directory_exists", inspection.optBoolean("has_smali_directory"))
+            .put("root_listing_page", rootListing)
+            .put("directory_sample", compactDirs)
+            .put("text_file_sample", compactSample)
+            .put("task_specific_gui_candidates", guiIndex.optJSONArray("candidates")?.let { source ->
+                JSONArray().also { target -> for (i in 0 until minOf(30, source.length())) target.put(source.opt(i)) }
+            } ?: JSONArray())
+            .put("actual_file_excerpts", excerpts)
+            .put("note", "This is a bounded snapshot, not the entire project. Exact path access remains available to the lead coordinator through local project tools.")
+            .toString()
+    }
+
+    /**
+     * Three separate model conversations execute concurrently with distinct specialist roles.
+     * All use the currently selected provider/model profile and the same read-only snapshot.
+     */
+    private suspend fun runThreeAgentCouncil(
+        token: String,
+        modelId: String,
+        provider: String,
+        baseUrl: String,
+        instruction: String,
+        projectContext: String
+    ): List<Pair<String, String>> = coroutineScope {
+        val specialists = listOf(
+            Triple("scout", "PROJECT SCOUT", """
+You are PROJECT SCOUT, one of three independent AI specialists collaborating on an Android APK modification.
+Your only job is project forensics: identify the actual entry points, UI/resource files, app architecture and missing evidence from the supplied verified snapshot.
+Never invent paths, class names, files or claims. Cite exact relative paths from the snapshot. Distinguish decoded Smali/resources from original Java/Kotlin source.
+Return a concise report with: (1) strongest exact paths and why, (2) important dependencies/references to trace, (3) files the lead must read next using its local tools, (4) uncertainties. Do not edit files or claim you did.
+""".trimIndent()),
+            Triple("engineer", "FEATURE ENGINEER", """
+You are FEATURE ENGINEER, one of three independent AI specialists collaborating on an Android APK modification.
+Study the user's exact task and the actual file excerpts. Propose the smallest technically correct implementation plan, identifying exact existing paths and the dependency chain. Point out where layout XML, values resources, Activity/Smali, assets or manifest declarations connect.
+Never invent paths or state that you modified files. Do not propose unnecessary changes, risky permissions or broad rewrites. Return: (1) implementation plan, (2) exact paths to read/patch, (3) expected behavior, (4) tests.
+""".trimIndent()),
+            Triple("reviewer", "BUILD & SAFETY REVIEWER", """
+You are BUILD & SAFETY REVIEWER, one of three independent AI specialists collaborating on an Android APK modification.
+Independently challenge the proposed approach using the supplied project evidence. Identify Apktool/decoded APK constraints, binary-vs-text concerns, resource reference risks, manifest/signing risks, likely build failure points and a short verification checklist.
+Never invent files or claim you ran a build. Do not edit anything. Return: (1) highest risks, (2) safer alternatives, (3) paths/evidence that must be verified, (4) acceptance tests.
+""".trimIndent())
+        )
+        val jobs = specialists.map { (role, name, systemPrompt) ->
+            async(Dispatchers.IO) {
+                val result = runCatching {
+                    requestAi(
+                        token = token,
+                        modelId = modelId,
+                        provider = provider,
+                        baseUrl = baseUrl,
+                        instruction = "User's requested task: " + instruction +
+                            "\nYou are part of a three-specialist conference. Give your own independent report to the lead coordinator.",
+                        context = projectContext,
+                        editRequest = false,
+                        systemOverride = systemPrompt,
+                        outputTokenLimit = 1100
+                    )
+                }.getOrElse { "SPECIALIST ERROR: " + (it.message ?: it.javaClass.simpleName) }
+                role to (if (result.isBlank()) "SPECIALIST ERROR: Provider returned an empty report." else result.take(6500))
+            }
+        }
+        jobs.awaitAll()
     }
 
     /**
@@ -901,18 +1062,22 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         baseUrl: String,
         instruction: String,
         context: String,
-        editRequest: Boolean
+        editRequest: Boolean,
+        systemOverride: String? = null,
+        outputTokenLimit: Int = if (editRequest) 4096 else 256
     ): String {
-        val system = if (editRequest) {
+        val system = systemOverride ?: if (editRequest) {
             """You are an Android APK project editing agent. Return ONLY valid JSON:
 {"summary":"brief explanation","changes":[{"path":"existing/relative/path","content":"complete replacement file text"}]}
 Only return files whose full text is included in the supplied source context. Never invent paths. Preserve unrelated code. Never change authentication, licensing, payment checks, anti-tamper or security protections. Keep the response concise. If safe edits cannot be determined, return an empty changes array and explain why in summary."""
         } else {
             "You are the in-app assistant for an Android APK editor. Answer the user's message directly and clearly in normal text. Do not return JSON. Do not claim to have changed files. No project files are included in this request."
         }
-        val userPrompt = if (editRequest) {
-            "TASK:\n" + instruction + "\n\nPROJECT CONTEXT:\n" + context
-        } else instruction
+        val userPrompt = when {
+            editRequest -> "TASK:\n" + instruction + "\n\nPROJECT CONTEXT:\n" + context
+            context.isNotBlank() -> "TASK:\n" + instruction + "\n\nPROJECT CONTEXT:\n" + context
+            else -> instruction
+        }
 
         if (provider == "Gemini") {
             val prompt = system + "\n\n" + userPrompt
@@ -921,7 +1086,7 @@ Only return files whose full text is included in the supplied source context. Ne
                     .put("role", "user")
                     .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
                 .put("generationConfig", JSONObject().put("temperature", 0.15)
-                    .put("maxOutputTokens", if (editRequest) 4096 else 256))
+                    .put("maxOutputTokens", outputTokenLimit))
             val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
                 ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -950,7 +1115,7 @@ Only return files whose full text is included in the supplied source context. Ne
         if (provider == "Anthropic") {
             val messages = JSONArray().put(JSONObject().put("role", "user").put("content", userPrompt))
             val payload = JSONObject().put("model", modelId)
-                .put("max_tokens", if (editRequest) 4096 else 256)
+                .put("max_tokens", outputTokenLimit)
                 .put("system", system).put("messages", messages)
             val endpoint = baseUrl.trim().trimEnd('/') + "/messages"
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -980,7 +1145,7 @@ Only return files whose full text is included in the supplied source context. Ne
             .put(JSONObject().put("role", "system").put("content", system))
             .put(JSONObject().put("role", "user").put("content", userPrompt))
         val payload = JSONObject().put("model", modelId).put("temperature", 0.15)
-            .put("max_tokens", if (editRequest) 4096 else 1024).put("messages", messages)
+            .put("max_tokens", outputTokenLimit).put("messages", messages)
         val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
         val conn = URL(endpoint).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
