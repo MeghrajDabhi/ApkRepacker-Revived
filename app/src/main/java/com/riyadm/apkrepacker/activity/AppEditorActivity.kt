@@ -74,8 +74,17 @@ class AppEditorActivity : BaseActivity() {
         supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
         binding.root.findViewById<View>(R.id.agent_fab)?.setOnClickListener {
-            startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
-                .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
+            try {
+                val projectDir = File(path).canonicalFile
+                check(projectDir.isDirectory && projectDir.canRead()) { "Decoded project is no longer accessible." }
+                startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
+                    .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, projectDir.absolutePath))
+            } catch (error: Exception) {
+                Log.e(TAG, "Unable to launch Agent for project: $path", error)
+                Toast.makeText(this@AppEditorActivity,
+                    "Agent could not open this project: ${error.message ?: error.javaClass.simpleName}",
+                    Toast.LENGTH_LONG).show()
+            }
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
