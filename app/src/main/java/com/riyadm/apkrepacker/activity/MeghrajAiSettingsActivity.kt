@@ -149,7 +149,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
         }
         val input = TextInputEditText(wrap.context).apply {
             if (secret) inputType = 129
-            singleLine = !secret
+            if (!secret) maxLines = 1
         }
         wrap.addView(input, ViewGroup.LayoutParams(-1, -2))
         input.tag = wrap
