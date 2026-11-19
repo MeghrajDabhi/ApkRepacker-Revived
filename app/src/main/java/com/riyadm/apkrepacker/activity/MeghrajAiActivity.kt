@@ -62,8 +62,8 @@ class MeghrajAiActivity : BaseActivity() {
         lifecycleScope.launch {
             try {
                 status.text = "Reading project files…"
-                val context = withContext(Dispatchers.IO) { readContext() }
-                status.text = "Sending selected source text to OpenRouter…"
+                val context = withContext(Dispatchers.IO) { readContext(instruction) }
+                status.text = "Indexed the selected project and preparing relevant source files for OpenRouter…"
                 val result = withContext(Dispatchers.IO) { requestAi(token, modelId, instruction, context) }
                 val json = JSONObject(result)
                 val changes = json.optJSONArray("changes") ?: error("AI response did not contain a changes array.")
@@ -87,76 +87,71 @@ class MeghrajAiActivity : BaseActivity() {
         }
     }
 
-    private fun readContext(): String {
-        val allowed = setOf("xml", "smali", "json", "txt", "properties", "yml", "yaml")
-        val files = project.walkTopDown().onEnter { dir ->
-            dir == project || (!dir.name.startsWith(".") && dir.name !in setOf("build", "original", "unknown"))
-        }.filter { it.isFile && it.extension.lowercase() in allowed }
-            .sortedBy { if (it.name == "AndroidManifest.xml") 0 else if (it.path.contains("/res/values")) 1 else 2 }
-        val out = StringBuilder()
-        var budget = 32000
-        var count = 0
-        for (file in files) {
-            if (count >= 8 || budget <= 0) break
-            val text = runCatching { file.readText(Charsets.UTF_8) }.getOrNull() ?: continue
-            if (text.contains('\u0000')) continue
-            val clipped = text.take(minOf(text.length, budget, 6000))
-            out.append("\n--- ").append(file.relativeTo(project).invariantSeparatorsPath).append(" ---\n").append(clipped).append("\n")
-            budget -= clipped.toByteArray().size
-            count++
+    /**
+     * Build a complete on-device project inventory, then attach relevant source files.
+     * The inventory includes every project path (including binary assets); source text is
+     * selectively sent to the model under a bounded context budget. APK/binary data is never uploaded.
+     */
+    private fun readContext(instruction: String): String {
+        val ignored = setOf("build", "original", "unknown", ".git", ".gradle", "tmp")
+        val allFiles = project.walkTopDown().onEnter { dir ->
+            dir == project || (!dir.name.startsWith(".") && dir.name !in ignored)
+        }.filter { it.isFile }.toList()
+
+        if (allFiles.isEmpty()) error("The selected project contains no files.")
+
+        val index = StringBuilder()
+        index.append("PROJECT ROOT: ").append(project.name).append("\\n")
+        index.append("TOTAL FILES: ").append(allFiles.size).append("\\n")
+        index.append("COMPLETE PROJECT FILE INDEX (path | size bytes | type):\\n")
+        for (file in allFiles) {
+            val relative = file.relativeTo(project).invariantSeparatorsPath
+            index.append(relative).append(" | ").append(file.length()).append(" | ")
+                .append(if (file.extension.isBlank()) "binary/unknown" else file.extension.lowercase())
+                .append("\\n")
         }
-        if (count == 0) error("No supported text files found.")
-        return out.toString()
-    }
 
-    private fun requestAi(token: String, modelId: String, instruction: String, context: String): String {
-        val system = "You are Meghraj AI, an Android APK project editing agent. Return ONLY JSON: " +
-            """{"summary":"short explanation","changes":[{"path":"relative/path","content":"complete replacement file text"}]}""" +
-            ". Only edit existing supplied files. Never invent paths. Preserve unrelated code. Do not modify signing keys, certificates, permissions, authentication, payments, licensing, anti-tamper, or security controls. If unsupported, return an empty changes array."
-        val messages = JSONArray()
-            .put(JSONObject().put("role", "system").put("content", system))
-            .put(JSONObject().put("role", "user").put("content", "TASK:\n" + instruction + "\n\nPROJECT FILES:\n" + context))
-        val payload = JSONObject().put("model", modelId).put("temperature", 0.2).put("messages", messages)
-        val conn = URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
-        conn.requestMethod = "POST"; conn.connectTimeout = 20000; conn.readTimeout = 90000; conn.doOutput = true
-        conn.setRequestProperty("Authorization", "Bearer " + token)
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("HTTP-Referer", "https://github.com/MeghrajDabhi/ApkRepacker-Revived")
-        conn.setRequestProperty("X-Title", "Meghraj AI APK Editor")
-        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-        val code = conn.responseCode
-        val response = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
-        conn.disconnect()
-        if (code !in 200..299) error("OpenRouter HTTP " + code + ": " + response.take(400))
-        var answer = JSONObject(response).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
-        if (answer.startsWith("```")) answer = answer.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        return answer
-    }
-
-    private fun applyChanges() {
-        val changes = proposed?.optJSONArray("changes") ?: return
-        try {
-            val root = project.canonicalFile
-            for (i in 0 until changes.length()) {
-                val item = changes.getJSONObject(i)
-                val rel = item.getString("path")
-                require(rel.isNotBlank() && !rel.startsWith("/") && !rel.contains("\\"))
-                val target = File(root, rel).canonicalFile
-                require(target.path.startsWith(root.path + File.separator)) { "Path escapes project" }
-                require(target.isFile) { "Only existing files can be replaced: " + rel }
-                require(target.extension.lowercase() in setOf("xml", "smali", "json", "txt", "properties", "yml", "yaml"))
-                val content = item.getString("content")
-                require(content.length <= 200000) { "Proposed file too large" }
-                val backup = File(target.parentFile, target.name + ".meghraj-ai-backup")
-                if (!backup.exists()) target.copyTo(backup)
-                val temp = File(target.parentFile, target.name + ".meghraj-ai-tmp")
-                temp.writeText(content, Charsets.UTF_8)
-                check(temp.renameTo(target)) { "Could not replace " + rel }
+        val textExtensions = setOf(
+            "xml", "smali", "json", "txt", "properties", "yml", "yaml",
+            "html", "htm", "css", "js", "java", "kt", "gradle", "pro",
+            "cfg", "ini", "md", "xml"
+        )
+        val taskWords = instruction.lowercase().split(Regex("[^a-z0-9_]+"))
+            .filter { it.length >= 3 }.toSet()
+        val candidates = allFiles.filter { it.extension.lowercase() in textExtensions }
+        fun priority(file: File): Int {
+            val path = file.relativeTo(project).invariantSeparatorsPath.lowercase()
+            return when {
+                file.name.equals("AndroidManifest.xml", true) -> 0
+                path.contains("/res/values") && (path.contains("color") || path.contains("style") || path.contains("theme")) -> 1
+                path.contains("/res/layout") || path.contains("/res/drawable") || path.contains("/res/color") || path.contains("/res/menu") -> 2
+                taskWords.any { word -> path.contains(word) } -> 3
+                path.contains("theme") || path.contains("color") || path.contains("style") || path.contains("layout") -> 4
+                else -> 5
             }
-            status.text = "Applied " + changes.length() + " edit(s). Backups are saved beside files with .meghraj-ai-backup. Review and rebuild."
-        } catch (e: Exception) { status.text = "Apply failed: " + (e.message ?: "unknown error") }
-        proposed = null
+        }
+        val ordered = candidates.sortedWith(compareBy<File> { priority(it) }.thenBy { it.path })
+        val source = StringBuilder()
+        var budget = 480 * 1024
+        var included = 0
+        for (file in ordered) {
+            if (budget <= 0) break
+            val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
+            if (bytes.any { it == 0.toByte() }) continue
+            val raw = runCatching { String(bytes, Charsets.UTF_8) }.getOrNull() ?: continue
+            if (raw.contains('\\u0000')) continue
+            val relative = file.relativeTo(project).invariantSeparatorsPath
+            val header = "\\n\\n===== SOURCE FILE: " + relative + " (" + bytes.size + " bytes) =====\\n"
+            val remaining = budget - header.length
+            if (remaining <= 0) break
+            val content = raw.take(minOf(raw.length, remaining, 48 * 1024))
+            source.append(header).append(content)
+            if (content.length < raw.length) source.append("\\n[FILE CONTENT TRUNCATED BY CONTEXT LIMIT]")
+            budget -= header.length + content.toByteArray(Charsets.UTF_8).size
+            included++
+        }
+        if (included == 0) error("No readable text source files were found in the selected project.")
+        return index.toString() + "\\nTEXT SOURCE FILES INCLUDED: " + included +
+            "\\nSOURCE CONTEXT LIMIT: 480 KB. Binary files are indexed but not uploaded." + source
     }
 
-    companion object { const val EXTRA_PROJECT_PATH = "meghraj_ai_project_path" }
-}
