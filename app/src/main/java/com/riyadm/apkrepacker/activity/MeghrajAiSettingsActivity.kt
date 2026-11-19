@@ -19,11 +19,15 @@ import java.net.URL
 
 class MeghrajAiSettingsActivity : BaseActivity() {
     private lateinit var provider: Spinner
+    private lateinit var savedProfiles: Spinner
+    private lateinit var profileName: TextInputEditText
     private lateinit var key: TextInputEditText
     private lateinit var baseUrl: TextInputEditText
     private lateinit var models: AutoCompleteTextView
     private lateinit var status: TextView
     private val modelIds = mutableListOf<String>()
+    private val savedProfilesList = mutableListOf<AiProfile>()
+    private var selectedProfileId: String? = null
     private val providers = listOf("OpenRouter", "AgentRouter", "Gemini", "DeepSeek", "OpenAI", "Anthropic", "Groq", "Mistral", "Together AI", "Fireworks AI", "Cerebras", "NVIDIA NIM", "Custom")
     private var lastAutoBase = ""
 
@@ -58,6 +62,32 @@ class MeghrajAiSettingsActivity : BaseActivity() {
             setPadding(0, dp(6), 0, dp(16))
             setTextColor(com.google.android.material.color.MaterialColors.getColor(this@MeghrajAiSettingsActivity, com.google.android.material.R.attr.colorOnSurfaceVariant, 0))
         })
+
+        val savedProfilesCard = card()
+        val savedProfilesBox = LinearLayout(this).apply { orientation = 1; setPadding(dp(16), dp(14), dp(16), dp(14)) }
+        savedProfilesBox.addView(sectionTitle("Saved API profiles"))
+        savedProfilesBox.addView(TextView(this).apply {
+            text = "Save complete provider setups and switch between them without re-entering keys."
+            textSize = 13f
+            setPadding(0, 0, 0, dp(8))
+        })
+        savedProfiles = Spinner(this)
+        savedProfilesBox.addView(savedProfiles)
+        profileName = field("Profile name (e.g. DeepSeek Coding)", false)
+        savedProfilesBox.addView(profileName.tag as View)
+        val profileButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        profileButtons.addView(MaterialButton(this@MeghrajAiSettingsActivity).apply {
+            text = "Save API profile"
+            setIconResource(com.riyadm.apkrepacker.R.drawable.ic_meghraj_ai)
+            setOnClickListener { saveApiProfile() }
+        }, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(6) })
+        profileButtons.addView(MaterialButton(this@MeghrajAiSettingsActivity).apply {
+            text = "Delete"
+            setOnClickListener { deleteSelectedProfile() }
+        }, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginStart = dp(6) })
+        savedProfilesBox.addView(profileButtons)
+        savedProfilesCard.addView(savedProfilesBox)
+        content.addView(savedProfilesCard, cardParams())
 
         val providerCard = card()
         val providerBox = LinearLayout(this).apply { orientation = 1; setPadding(dp(16), dp(14), dp(16), dp(14)) }
@@ -101,14 +131,14 @@ class MeghrajAiSettingsActivity : BaseActivity() {
             setOnClickListener { fetchModels() }
         }, LinearLayout.LayoutParams(-1, dp(52)))
         content.addView(MaterialButton(this).apply {
-            text = "Save provider settings"
+            text = "Apply current settings"
             setIconResource(com.riyadm.apkrepacker.R.drawable.ic_meghraj_ai)
             setOnClickListener {
                 val selected = models.text?.toString()?.trim().takeUnless { it.isNullOrBlank() }
                     ?: AiConfig.getModel(this@MeghrajAiSettingsActivity)
                 AiConfig.save(this@MeghrajAiSettingsActivity, key.text?.toString().orEmpty().trim(), selected,
                     providers[provider.selectedItemPosition], baseUrl.text?.toString().orEmpty().trim())
-                status.text = "Saved. Provider: ${providers[provider.selectedItemPosition]} · Model: $selected"
+                status.text = "Current settings applied. Provider: ${providers[provider.selectedItemPosition]} · Model: $selected"
             }
         }, LinearLayout.LayoutParams(-1, dp(52)))
 
@@ -127,12 +157,95 @@ class MeghrajAiSettingsActivity : BaseActivity() {
             }
         }
         setContentView(page)
+        savedProfiles.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item,
+            mutableListOf("Select a saved API profile")).also {
+            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        savedProfiles.setSelection(0)
+        savedProfiles.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position == 0) {
+                    selectedProfileId = null
+                } else {
+                    val profile = savedProfilesList.getOrNull(position - 1) ?: return
+                    loadProfile(profile)
+                }
+            }
+        }
+        refreshSavedProfiles(AiConfig.getActiveProfileId(this))
         val savedModel = AiConfig.getModel(this)
         if (savedModel.isNotBlank()) {
             modelIds.add(savedModel)
             models.setAdapter(ArrayAdapter(this, android.R.layout.simple_dropdown_item_1line, modelIds))
             models.setText(savedModel, false)
         }
+    }
+
+    private fun refreshSavedProfiles(selectId: String? = null) {
+        savedProfilesList.clear()
+        savedProfilesList.addAll(AiConfig.getProfiles(this))
+        val labels = mutableListOf("Select a saved API profile")
+        labels.addAll(savedProfilesList.map { it.name + "  ·  " + it.provider + " / " + it.model })
+        savedProfiles.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).also {
+            it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        val index = savedProfilesList.indexOfFirst { it.id == selectId }
+        savedProfiles.setSelection(if (index >= 0) index + 1 else 0)
+        selectedProfileId = if (index >= 0) selectId else null
+    }
+
+    private fun loadProfile(profile: AiProfile) {
+        if (profile.apiKey.isBlank()) {
+            status.text = "This saved API key could not be decrypted. Save the profile again."
+            return
+        }
+        selectedProfileId = profile.id
+        profileName.setText(profile.name)
+        val providerIndex = providers.indexOf(profile.provider).coerceAtLeast(0)
+        lastAutoBase = AiConfig.defaultBaseUrl(profile.provider)
+        provider.setSelection(providerIndex)
+        key.setText(profile.apiKey)
+        baseUrl.setText(profile.baseUrl)
+        models.setText(profile.model, false)
+        AiConfig.activateProfile(this, profile.id)
+        status.text = "Active profile: " + profile.name + " · " + profile.provider + " · " + profile.model
+    }
+
+    private fun saveApiProfile() {
+        val name = profileName.text?.toString()?.trim().orEmpty()
+        val token = key.text?.toString()?.trim().orEmpty()
+        val base = baseUrl.text?.toString()?.trim()?.trimEnd('/').orEmpty()
+        val modelId = models.text?.toString()?.trim().orEmpty()
+        val selectedProvider = providers.getOrNull(provider.selectedItemPosition).orEmpty()
+        try {
+            val id = AiConfig.saveApiProfile(this, name, selectedProvider, base, modelId, token, selectedProfileId)
+            refreshSavedProfiles(id)
+            status.text = "API profile saved securely: " + name
+        } catch (e: Exception) {
+            status.text = "Could not save API profile: " + (e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    private fun deleteSelectedProfile() {
+        val id = selectedProfileId
+        if (id.isNullOrBlank()) {
+            status.text = "Select a saved API profile to delete."
+            return
+        }
+        val name = savedProfilesList.firstOrNull { it.id == id }?.name ?: "this profile"
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+            .setTitle("Delete saved API profile?")
+            .setMessage("Delete $name from this device? This cannot be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                AiConfig.deleteProfile(this, id)
+                selectedProfileId = null
+                profileName.setText("")
+                refreshSavedProfiles()
+                status.text = "Saved API profile deleted."
+            }
+            .show()
     }
 
     private fun card() = MaterialCardView(this).apply {
