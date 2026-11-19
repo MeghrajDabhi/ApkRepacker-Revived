@@ -212,7 +212,10 @@ class MeghrajAiActivity : BaseActivity() {
     }
 
     private fun refreshProviderSummary() {
-        providerSummary.text = AiConfig.getProvider(this) + "  ·  " + AiConfig.getModel(this)
+        val activeId = AiConfig.getActiveProfileId(this)
+        val activeName = AiConfig.getProfiles(this).firstOrNull { it.id == activeId }?.name
+        providerSummary.text = (activeName?.let { "$it  ·  " } ?: "") +
+            AiConfig.getProvider(this) + "  ·  " + AiConfig.getModel(this)
     }
 
     private fun addMessage(role: String, message: String) {
@@ -402,7 +405,8 @@ Only return files whose full text is included in the supplied source context. Ne
                 .put("contents", JSONArray().put(JSONObject()
                     .put("role", "user")
                     .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
-                .put("generationConfig", JSONObject().put("temperature", 0.15).put("maxOutputTokens", 2048))
+                .put("generationConfig", JSONObject().put("temperature", 0.15)
+                    .put("maxOutputTokens", if (editRequest) 4096 else 1024))
             val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
                 ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -430,7 +434,8 @@ Only return files whose full text is included in the supplied source context. Ne
 
         if (provider == "Anthropic") {
             val messages = JSONArray().put(JSONObject().put("role", "user").put("content", userPrompt))
-            val payload = JSONObject().put("model", modelId).put("max_tokens", 2048)
+            val payload = JSONObject().put("model", modelId)
+                .put("max_tokens", if (editRequest) 4096 else 1024)
                 .put("system", system).put("messages", messages)
             val endpoint = baseUrl.trim().trimEnd('/') + "/messages"
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -460,7 +465,7 @@ Only return files whose full text is included in the supplied source context. Ne
             .put(JSONObject().put("role", "system").put("content", system))
             .put(JSONObject().put("role", "user").put("content", userPrompt))
         val payload = JSONObject().put("model", modelId).put("temperature", 0.15)
-            .put("max_tokens", 2048).put("messages", messages)
+            .put("max_tokens", if (editRequest) 4096 else 1024).put("messages", messages)
         val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
         val conn = URL(endpoint).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
