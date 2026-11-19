@@ -58,14 +58,14 @@ class MeghrajAiActivity : BaseActivity() {
         val modelId = model.text.toString().trim().ifBlank { AiConfig.getModel(this) }
         val instruction = task.text.toString().trim()
         if (token.isBlank() || instruction.isBlank()) { status.text = "Enter your API key and a task."; return }
-        AiConfig.save(this, token, modelId)
+        AiConfig.save(this, token, modelId, AiConfig.getProvider(this), AiConfig.getBaseUrl(this))
         run.isEnabled = false
         lifecycleScope.launch {
             try {
                 status.text = "Indexing every file in the selected project…"
                 val context = withContext(Dispatchers.IO) { readContext(instruction) }
                 status.text = "Sending project index and source context to OpenRouter…"
-                val answer = withContext(Dispatchers.IO) { requestAi(token, modelId, instruction, context) }
+                val answer = withContext(Dispatchers.IO) { requestAi(token, modelId, AiConfig.getProvider(this), AiConfig.getBaseUrl(this), instruction, context) }
                 val json = JSONObject(answer)
                 val changes = json.optJSONArray("changes") ?: error("AI response did not contain a changes array.")
                 if (changes.length() == 0) {
@@ -137,56 +137,50 @@ class MeghrajAiActivity : BaseActivity() {
             "\nBINARY FILES ARE INDEXED BUT NOT UPLOADED.\n" + source
     }
 
-    private fun requestAi(token: String, modelId: String, instruction: String, context: String): String {
+    private fun requestAi(token: String, modelId: String, provider: String, baseUrl: String, instruction: String, context: String): String {
         val system = """You are an Android APK project editing agent. Return ONLY JSON:
 {"summary":"brief explanation","changes":[{"path":"existing/relative/path","content":"complete replacement file text"}]}
 Use the complete file index to identify correct existing source files. Only return paths whose full text is included below. For GUI color changes inspect color resources, values, themes, styles, layouts, drawable XML and relevant Smali references. Never invent paths. Preserve unrelated code. Do not alter authentication, licensing, payment checks, anti-tamper or security protections. If you cannot safely determine an edit, return an empty changes array and explain why."""
         val messages = JSONArray()
             .put(JSONObject().put("role","system").put("content",system))
-            .put(JSONObject().put("role","user").put("content","TASK:\n" + instruction + "\n\nPROJECT:\n" + context))
+            .put(JSONObject().put("role","user").put("content","TASK:\\n" + instruction + "\\n\\nPROJECT:\\n" + context))
         val payload = JSONObject().put("model",modelId).put("temperature",0.15).put("messages",messages)
-        val conn = URL("https://openrouter.ai/api/v1/chat/completions").openConnection() as HttpURLConnection
+        val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
         conn.requestMethod = "POST"; conn.connectTimeout = 20000; conn.readTimeout = 120000; conn.doOutput = true
         conn.setRequestProperty("Authorization","Bearer " + token)
         conn.setRequestProperty("Content-Type","application/json")
-        conn.setRequestProperty("HTTP-Referer","https://github.com/MeghrajDabhi/ApkRepacker-Revived")
-        conn.setRequestProperty("X-Title","Meghraj AI APK Editor")
+        conn.setRequestProperty("Accept","application/json")
+        if (provider == "OpenRouter") {
+            conn.setRequestProperty("HTTP-Referer","https://github.com/MeghrajDabhi/ApkRepacker-Revived")
+            conn.setRequestProperty("X-Title","Meghraj AI APK Editor")
+        }
         conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val code = conn.responseCode
         val response = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
         conn.disconnect()
-        if (code !in 200..299) error("OpenRouter HTTP " + code + ": " + response.take(500))
-        var content = JSONObject(response).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content").trim()
-        if (content.startsWith("```")) content = content.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        return content
+        if (code !in 200..299) error("$provider chat API HTTP $code at $endpoint: " + response.take(700))
+        val root = JSONObject(response)
+        val choices = root.optJSONArray("choices") ?: error("$provider response has no choices array: " + response.take(500))
+        if (choices.length() == 0) error("$provider returned no choices: " + response.take(500))
+        val message = choices.getJSONObject(0).optJSONObject("message") ?: error("$provider response has no message object.")
+        val rawContent = message.opt("content")
+        val content = when (rawContent) {
+            is String -> rawContent
+            is org.json.JSONArray -> (0 until rawContent.length()).mapNotNull { i ->
+                val part = rawContent.optJSONObject(i)
+                part?.optString("text")?.takeIf { it.isNotBlank() }
+            }.joinToString("\\n")
+            else -> ""
+        }.trim()
+        if (content.isBlank()) error("$provider returned an empty assistant response. Finish reason: " + choices.optJSONObject(0)?.optString("finish_reason"))
+        var normalized = content
+        if (normalized.startsWith("```")) {
+            normalized = normalized.removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+        }
+        val first = normalized.indexOf('{')
+        val last = normalized.lastIndexOf('}')
+        if (first >= 0 && last > first) normalized = normalized.substring(first, last + 1)
+        return normalized
     }
 
-    private fun applyChanges() {
-        val changes = proposed?.optJSONArray("changes") ?: return
-        try {
-            val root = project.canonicalFile
-            for (i in 0 until changes.length()) {
-                val item = changes.getJSONObject(i)
-                val rel = item.getString("path")
-                require(rel.isNotBlank() && !rel.startsWith("/") && !rel.contains("\\"))
-                val target = File(root, rel).canonicalFile
-                require(target.path.startsWith(root.path + File.separator)) { "Path escapes project: " + rel }
-                require(target.isFile) { "Only existing files can be edited: " + rel }
-                require(target.extension.lowercase() in setOf("xml","smali","json","txt","properties","yml","yaml","html","css","js","java","kt","gradle","pro","cfg","ini","md"))
-                val content = item.getString("content")
-                require(content.length <= 200000) { "Proposed file is too large: " + rel }
-                val backup = File(target.parentFile, target.name + ".meghraj-ai-backup")
-                if (!backup.exists()) target.copyTo(backup)
-                val temp = File(target.parentFile, target.name + ".meghraj-ai-tmp")
-                temp.writeText(content, Charsets.UTF_8)
-                check(temp.renameTo(target)) { "Could not replace " + rel }
-            }
-            status.text = "Applied " + changes.length() + " edit(s). Backups are beside files with .meghraj-ai-backup. Review and rebuild."
-        } catch (e: Exception) { status.text = "Apply failed: " + (e.message ?: "unknown error") }
-        proposed = null
-    }
-
-    companion object {
-        const val EXTRA_PROJECT_PATH = "projectPatch"
-    }
-}
