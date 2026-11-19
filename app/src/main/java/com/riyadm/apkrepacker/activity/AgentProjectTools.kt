@@ -155,17 +155,51 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
      * still blocks ../ traversal and symlink escapes.
      */
     private fun target(rawPath: String): File {
-        require(rawPath.isNotBlank()) { "A project-relative path is required." }
-        val cleaned = rawPath.trim().replace('\\', '/')
-        val candidate = if (File(cleaned).isAbsolute || Regex("^[A-Za-z]:/").containsMatchIn(cleaned)) {
-            File(cleaned)
-        } else {
-            File(project, cleaned)
-        }
-        val file = candidate.canonicalFile
+        require(rawPath.isNotBlank()) { "A project path is required." }
+        val cleaned = rawPath.trim().trim('`','"').replace('\\', '/').removePrefix("./")
         val rootPath = project.canonicalFile.toPath()
-        val resolvedPath = file.toPath()
-        require(resolvedPath != rootPath && resolvedPath.startsWith(rootPath)) {
+        val absolute = File(cleaned).isAbsolute || Regex("^[A-Za-z]:/").containsMatchIn(cleaned)
+        if (absolute) {
+            val file = File(cleaned).canonicalFile
+            require(file.toPath() != rootPath && file.toPath().startsWith(rootPath)) {
+                "Rejected path outside the selected project: $rawPath"
+            }
+            return file
+        }
+        val rawParts = cleaned.trim('/').split('/').filter { it.isNotBlank() && it != "." }
+        require(rawParts.none { it == ".." }) { "Parent-directory traversal is not allowed: $rawPath" }
+        val parts = if (rawParts.firstOrNull()?.equals(project.name,true) == true) rawParts.drop(1) else rawParts
+        require(parts.isNotEmpty()) { "The project root is not a file. Use an exact child path." }
+        var current = project
+        parts.forEachIndexed { index, part ->
+            val children = current.listFiles()
+            val exact = children?.firstOrNull { it.name == part }
+            val matched = exact ?: children?.filter { it.name.equals(part,true) }?.let { options ->
+                when (options.size) {
+                    0 -> null
+                    1 -> options.first()
+                    else -> error("Path segment '$part' is ambiguous. Use exact spelling: " + options.joinToString { it.name })
+                }
+            }
+            if (matched != null) {
+                require(!java.nio.file.Files.isSymbolicLink(matched.toPath())) {
+                    "Symbolic-link paths are not followed."
+                }
+                current = matched
+            } else if (index == parts.lastIndex) {
+                // A missing final component is allowed for create_project_file; all its parents
+                // must exist and be enumerable. Other tools validate existence/type afterwards.
+                current = File(current,part)
+            } else {
+                val actual = children?.sortedBy { it.name.lowercase() }?.take(20)
+                    ?.joinToString { (if (it.isDirectory) "[DIR] " else "") + it.name }
+                    ?: "Android could not enumerate this parent directory."
+                error("Folder/path '$part' was not found under '${current.relativeTo(project).invariantSeparatorsPath}'. " +
+                    "Actual entries: $actual. Retry with the exact directory and file names.")
+            }
+        }
+        val file = current.canonicalFile
+        require(file.toPath() != rootPath && file.toPath().startsWith(rootPath)) {
             "Rejected path outside the selected project: $rawPath"
         }
         return file
@@ -469,7 +503,6 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         var scanned = 0
         for (file in allTextFiles().drop(offset).take(limit)) {
             scanned++
-            if (matches.length() >= 35) break
             runCatching {
                 file.useLines(Charsets.UTF_8) { lines ->
                     var lineNumber = 0
