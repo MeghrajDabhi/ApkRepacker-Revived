@@ -32,9 +32,9 @@ class MeghrajAiActivity : BaseActivity() {
         val body = LinearLayout(this).apply { orientation = 1 }
         scroll.addView(body)
         page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        body.addView(TextView(this).apply { text = "✦ Meghraj AI"; textSize = 25f })
+        body.addView(TextView(this).apply { text = "Agent"; textSize = 25f })
         body.addView(TextView(this).apply {
-            text = "Project: " + project.name + "\nThe project index is read locally. Relevant text files are sent to OpenRouter; APK binaries are not uploaded."
+            text = "Project: " + project.name + "\nThe project index is read locally. Relevant text files are sent to your selected provider; APK binaries are not uploaded."
             textSize = 13f; setPadding(0, 12, 0, 16)
         })
         key = edit("OpenRouter API key", true).also { it.setText(AiConfig.getKey(this)); body.addView(it) }
@@ -153,7 +153,7 @@ Use the complete file index to identify correct existing source files. Only retu
         conn.setRequestProperty("Accept","application/json")
         if (provider == "OpenRouter") {
             conn.setRequestProperty("HTTP-Referer","https://github.com/MeghrajDabhi/ApkRepacker-Revived")
-            conn.setRequestProperty("X-Title","Meghraj AI APK Editor")
+            conn.setRequestProperty("X-Title","Agent APK Editor")
         }
         conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val code = conn.responseCode
