@@ -356,12 +356,20 @@ class MeghrajAiActivity : BaseActivity() {
         val runtime = projectTools ?: AgentProjectTools(this, project).also { projectTools = it }
         val messages = JSONArray()
         messages.put(JSONObject().put("role", "system").put("content",
-            """You are ONE single coding agent operating on the user's selected decoded Android APK project. Do not create or simulate multiple agents. You have local tools that inspect and edit actual files; do not return code for the user to copy.
-For every project task, FIRST call inspect_project, then find_gui_files with the user's task description. The inventory is names and metadata only; NEVER upload or read every file's contents. Start with filenames, sizes, extensions and directory names. Read ONLY the few files needed for the current task, in small chunks.
-Trace Android UI ownership in this order: AndroidManifest.xml -> launcher Activity class -> Activity/Smali code -> setContentView, inflate or Compose content -> referenced res/layout XML -> referenced @string/@color/@drawable/@style resources. Decoded APKs often contain Smali instead of Java/Kotlin; never assume MainActivity.kt exists. If names do not identify the UI, search visible text, resource IDs, setContentView, inflate, Compose setContent, WebView.loadUrl and referenced resource names. Use exact returned paths only. Explain which actual files control the requested UI before editing when useful. Consult current official Android developer documentation when framework behavior is uncertain, and distinguish documentation advice from evidence in this project. This inventory includes hidden folders, .git, build/generated folders, all regular file types and all nested directories under the selected project; symbolic links are intentionally not followed. Then call find_gui_files with the user's task description. Use only exact paths returned by those tools; never assume a MainActivity.kt, res/layout or any folder exists. The root listing is paginated. For every relevant folder, call list_project_files with offset=0 and follow next_offset until has_more=false. The list reports each file's exact path, byte size, extension, readability and text/binary classification. Never claim a file is missing merely because it was not in the first page. Use read_project_file for supported text files in bounded chunks, continuing with next_start_line. Use inspect_project_file for ANY binary or unfamiliar file extension; inspect its size, SHA-256, header and image dimensions before deciding whether it matters. When actual raw bytes are needed, use read_project_binary_chunk with 1-8 KB chunks and follow next_offset; do not send entire large binaries into context. Do not decode binary bytes as text or overwrite a binary asset using a text patch tool. If any tool returns ok=false or a path error, inspect the actual root, list the root with an empty path, and continue using exact returned paths. Search for visible labels, resource IDs, launcher Activity declarations and layout references. For a GUI color change, inspect layout XML plus values/colors.xml, styles.xml/themes.xml and relevant drawable resources before choosing the source of the color. Then apply focused edits directly to the decoded project, using apply_multi_file_patches when several existing files must change together, and rebuild. Never return code for the user to copy.
-After edits, inspect relevant changed files and call build_project to compile the APK. If the build fails, analyze the actual errors, make a focused fix, and retry (maximum 3 build attempts). Never claim a build succeeded unless the build tool confirms it.
-This is HYBRID mode: safe source/resource edits may be applied automatically. The app asks the user before manifest edits or file deletion. Do not add permissions, change package identity, weaken app security, or alter signing settings unless the user explicitly requested it. Never read or expose API keys, private signing keys, credentials, or unrelated personal files.
-Only work inside the selected project. Use rollback_last_changes if you need to undo your own changes. Keep tool calls focused and final report concise. The APK is rebuilt unsigned; do not claim it is installed or signed."""
+            """You are ONE project agent. Work on the one decoded APK project selected by the user. Your local project tools are the source of truth.
+FIRST inspect_project. The preflight contains project root, counts and file/folder names only; the whole project is not sent to the model. For each task, classify the likely Android implementation location before reading file content:
+- Activity screen: inspect AndroidManifest.xml to resolve the declared Activity name, then resolve that class to the exact Java/Kotlin/Smali path.
+- Classic View UI: trace Activity.setContentView(R.layout.name), LayoutInflater.inflate or Fragment.onCreateView to the exact res/layout[-qualifier]/name.xml file.
+- Fragment UI: trace the host Activity/navigation and Fragment class, then its inflated layout if it has one.
+- Compose UI: trace setContent and @Composable functions in the actual source/Smali; do not expect res/layout XML.
+- Colors/themes/styles/dimensions/strings: inspect exact res/values* XML files and references from the targeted UI.
+- Icons/images/drawables/menus/WebView: inspect only the exact resource or assets paths referenced by the targeted screen.
+Call find_gui_files with the user's task; use its android_ui_map to trace manifest Activity names to real code and resource paths. When Android framework conventions are unclear, call lookup_android_docs using the appropriate topic (activity, fragment, layout, resources, manifest, compose, webview or smali). Official docs explain general Android conventions only; they do not prove which file this APK uses.
+IMPORTANT CONTEXT RULE: first read file/folder names, sizes and metadata. Do not read all files. Read only the smallest relevant candidate set, and only the exact file contents necessary to understand the requested change. Other files should remain names/metadata only. Follow read_project_file chunks only when the file is relevant. If an exact path fails, use the tool's actual-parent suggestions, list that valid parent and retry with the corrected exact path. Path lookup is case-insensitive when unambiguous. Before saying no file exists, use search_project_files with offset/next_offset to search through the whole project, not just the first page.
+Use inspect_project_file for binary resources and read_project_binary_chunk only when necessary; never treat DEX/images/fonts as text. Do not read or expose API keys, private signing keys, credentials or unrelated personal files.
+If the user asks WHERE a UI or setting is located, FIND and READ the relevant file(s), explain the exact path and resource/class relationship, and DO NOT edit or build anything. If the user asks to inspect, search, identify, explain or map project files, do that as a read-only task. If the user requests a change, apply focused edits only to relevant files using apply_multi_file_patches where appropriate. Obtain approval for manifest changes and file deletion. Never invent paths or ask the user to copy code.
+Only after a real source/resource change, inspect the changed files and call build_project. Do not run a build for a read-only locate/explain/search task. If the build fails, examine actual errors and retry focused fixes (maximum 3 attempts). Never claim success without tool evidence. The APK output is unsigned. Preserve app authentication, licensing, payments and security logic; do not weaken protections."""
+
         ))
         messages.put(JSONObject().put("role","user").put("content",
             "Selected project: " + project.name + "\nVerified project root: " + project.absolutePath +
@@ -405,6 +413,9 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         val toolDefinitions = runtime.definitions()
         var completedToolCalls = 0
         var buildAttempts = 0
+        var projectFilesChanged = false
+        val explicitBuildRequest = instruction.contains("build",true) ||
+            instruction.contains("rebuild",true) || instruction.contains("compile",true)
         while (completedToolCalls < 96) {
             val cycleStart = messages.length()
             status.text = "Agent thinking · step " + (completedToolCalls + 1) + " · " + provider
@@ -429,6 +440,7 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     "find_gui_files" -> "Finding the actual GUI and Activity files"
                     "list_project_files" -> "Exploring project files"
                     "search_project_files" -> "Searching source and resources"
+                    "lookup_android_docs" -> "Checking official Android documentation"
                     "read_project_file" -> "Reading " + args.optString("path")
                     "apply_file_patch" -> "Editing " + args.optString("path")
                     "apply_multi_file_patches" -> "Applying a multi-file change"
@@ -457,11 +469,18 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                 val approved = if (approvalDetails != null) confirmAgentAction(approvalDetails) else true
                 val result = if (!approved) {
                     JSONObject().put("approved",false).put("message","User declined this action. Do not retry the same action; continue safely or explain the limitation.").toString()
+                } else if (name == "build_project" && !projectFilesChanged && !explicitBuildRequest) {
+                    JSONObject().put("success",false).put("skipped",true)
+                        .put("error","No project files were changed. This is a read-only task, so no APK build is needed.").toString()
                 } else if (name == "build_project" && buildAttempts >= 3) {
                     JSONObject().put("success",false).put("error","Agent build retry limit reached (3 attempts). Stop building and report the remaining errors.").toString()
                 } else {
                     if (name == "build_project") buildAttempts++
                     withContext(Dispatchers.IO) { runtime.execute(name,args) }
+                }
+                if (approved && name in setOf("apply_file_patch","apply_multi_file_patches","create_project_file","delete_project_file")) {
+                    val changedOk = runCatching { JSONObject(result).optBoolean("ok",false) }.getOrDefault(false)
+                    projectFilesChanged = projectFilesChanged || changedOk
                 }
                 completedToolCalls++
                 if (name == "apply_file_patch" && approved) {
