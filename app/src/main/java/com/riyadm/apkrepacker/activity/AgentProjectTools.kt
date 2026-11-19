@@ -479,8 +479,19 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
 
     private fun listFiles(relative: String, requestedOffset: Int, requestedLimit: Int): String {
         val folder = if (relative.isBlank() || relative == ".") project else target(relative)
-        require(folder.exists() && folder.isDirectory && folder.canRead()) {
-            "Folder not found or unreadable: '" + relative + "'. The selected project root is '" + project.absolutePath + "'. Call inspect_project and use one of its exact directory_paths."
+        if (!folder.exists() || !folder.isDirectory || !folder.canRead()) {
+            var parent = folder.parentFile
+            while (parent != null && (!parent.exists() || !parent.isDirectory || !parent.canRead())) {
+                parent = parent.parentFile
+            }
+            if (parent == null || !parent.canonicalFile.toPath().startsWith(project.canonicalFile.toPath())) parent = project
+            val actualEntries = parent.listFiles()?.sortedBy { it.name.lowercase() }?.take(30)
+                ?.joinToString("\n") { (if (it.isDirectory) "[DIR] " else "[FILE] ") + it.name }
+                ?: "Android could not enumerate this folder."
+            error("Folder not found or unreadable: '$relative'. Selected project root: '${project.absolutePath}'. " +
+                "Closest readable parent: '${parent.relativeTo(project).invariantSeparatorsPath}'. " +
+                "Actual entries in that parent:\n" + actualEntries +
+                "\nRetry with the exact spelling shown above. The Agent accepts project-relative paths and absolute paths inside this project.")
         }
         val offset = requestedOffset.coerceAtLeast(0)
         val limit = requestedLimit.coerceIn(20,80)
