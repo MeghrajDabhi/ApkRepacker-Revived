@@ -200,10 +200,11 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val rootFiles = JSONArray()
         project.listFiles()?.sortedBy { it.name.lowercase() }?.forEach { child ->
             if (child.isDirectory) {
-                val direct = child.listFiles().orEmpty()
+                val direct = child.listFiles()
                 directories.put(JSONObject().put("name",child.name)
-                    .put("direct_files",direct.count { it.isFile })
-                    .put("subdirectories",JSONArray(direct.filter { it.isDirectory }.map { it.name }.sorted())))
+                    .put("readable",child.canRead() && direct != null)
+                    .put("direct_files",direct?.count { it.isFile } ?: -1)
+                    .put("subdirectories",JSONArray(direct?.filter { it.isDirectory }?.map { it.name }?.sorted().orEmpty())))
             } else {
                 rootFiles.put(JSONObject().put("name",child.name).put("bytes",child.length())
                     .put("text_candidate",isText(child)))
@@ -295,9 +296,13 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         }
         val offset = requestedOffset.coerceAtLeast(0)
         val limit = requestedLimit.coerceIn(20,80)
-        val children = folder.listFiles()?.filter { child ->
+        val rawChildren = folder.listFiles()
+        require(rawChildren != null) {
+            "Android could not enumerate this directory (permission denied or storage error): " + folder.absolutePath
+        }
+        val children = rawChildren.filter { child ->
             !java.nio.file.Files.isSymbolicLink(child.toPath())
-        }?.sortedWith(compareBy<File>({ if (it.isDirectory) 0 else 1 }, { it.name.lowercase() })).orEmpty()
+        }.sortedWith(compareBy<File>({ if (it.isDirectory) 0 else 1 }, { it.name.lowercase() }))
         val page = children.drop(offset).take(limit)
         val dirs = JSONArray()
         val files = JSONArray()
@@ -341,7 +346,9 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                 if (count >= 25) break
             }
         }
-        return JSONObject().put("query",query).put("matches",matches).put("truncated",count>=40).toString()
+        return JSONObject().put("query",query).put("matches",matches).put("truncated",count>=25)
+            .put("files_scanned",allTextFiles().take(1200).count())
+            .put("scan_limit",1200).toString()
     }
 
     private fun readFile(relative: String, start: Int, end: Int): String {
