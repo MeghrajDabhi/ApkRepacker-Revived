@@ -55,7 +55,7 @@ class AppEditorActivity : BaseActivity() {
         super.onCreate(savedInstanceState)
         // Extras can be missing when the activity is recreated without its launch intent
         // (e.g. reopened from Recents); fall back to the saved state and bail out if the project is gone.
-        projectPath = intent.getStringExtra(EXTRA_PROJECT_PATH) ?: savedInstanceState?.getString(EXTRA_PROJECT_PATH)
+        projectPath = intent.getStringExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH) ?: savedInstanceState?.getString(EXTRA_PROJECT_PATH)
         apkIconBase64 = intent.getStringExtra(EXTRA_ICON) ?: savedInstanceState?.getString(EXTRA_ICON)
         apkFileName = intent.getStringExtra(EXTRA_NAME) ?: savedInstanceState?.getString(EXTRA_NAME)
         apkPackageName = intent.getStringExtra(EXTRA_PACKAGE) ?: savedInstanceState?.getString(EXTRA_PACKAGE)
