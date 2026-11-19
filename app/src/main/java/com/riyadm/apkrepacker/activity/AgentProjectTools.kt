@@ -31,8 +31,10 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             objSchema(JSONObject(),JSONArray())))
         tools.put(function("find_gui_files","Find actual GUI files: layout XML, themes, colors, dimensions, drawables, menus, Compose sources, WebView assets and Activity/Smali entry points. Returns ranked exact paths.",
             objSchema(JSONObject().put("task_hint",str("Optional task description such as main screen, settings screen or button colors.")),JSONArray())))
-        tools.put(function("list_project_files","List source/resource files under a project folder. Empty path means project root. If a guessed folder is missing, use returned real folders and suggestions.",
-            schema("path","Relative folder path; empty string means project root.")))
+        tools.put(function("list_project_files","List actual directories and files under a project folder in small pages. Empty path means project root. Use next_offset until has_more=false. If a folder is missing, inspect the real root and use exact paths.",
+            objSchema(JSONObject().put("path",str("Relative folder path; empty string means project root."))
+                .put("offset",JSONObject().put("type","integer").put("description","Zero-based page offset; defaults to 0."))
+                .put("limit",JSONObject().put("type","integer").put("description","Page size from 20 to 120; defaults to 80.")),JSONArray())))
         tools.put(function("search_project_files","Search text content across decoded APK files. Returns bounded matching paths and line excerpts.",
             schema("query","Text, resource name, class, method, or identifier to search for.")))
         tools.put(function("read_project_file","Read a specific project text file with line numbers in chunks of at most 120 lines. The result includes has_more and next_start_line.",
@@ -96,7 +98,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         when(name) {
             "inspect_project" -> inspectProject()
             "find_gui_files" -> findGuiFiles(args.optString("task_hint",""))
-            "list_project_files" -> listFiles(args.optString("path",""))
+            "list_project_files" -> listFiles(args.optString("path",""),args.optInt("offset",0),args.optInt("limit",80))
             "search_project_files" -> searchFiles(args.optString("query",""))
             "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",250))
             "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
@@ -156,6 +158,9 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val important = listOf("AndroidManifest.xml","apktool.yml","res/values/strings.xml",
             "res/values/styles.xml","res/values/themes.xml").filter { File(project,it).isFile }
         val count = allTextFiles().take(10001).count()
+        val allEntries = project.walkTopDown()
+            .onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
+            .take(50001).filter { it.isFile }.count()
         val textSample = JSONArray()
         allTextFiles().take(80).forEach { textSample.put(it.relativeTo(project).invariantSeparatorsPath) }
         return JSONObject().put("ok",true).put("project_name",project.name)
@@ -164,6 +169,11 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .put("root_directories",directories).put("root_files",rootFiles)
             .put("directory_paths",directoryPaths).put("important_files",JSONArray(important))
             .put("readable_text_files",count).put("count_capped",count > 10000)
+            .put("total_project_files",allEntries).put("total_files_capped",allEntries > 50000)
+            .put("has_android_manifest",File(project,"AndroidManifest.xml").isFile)
+            .put("has_apktool_metadata",File(project,"apktool.yml").isFile)
+            .put("has_resource_directory",File(project,"res").isDirectory)
+            .put("has_smali_directory",project.listFiles()?.any { it.isDirectory && it.name.startsWith("smali") } == true)
             .put("text_file_sample",textSample).put("gui_candidates",guiCandidates(""))
             .put("note","Full local inventory includes folders and binary assets. Text contents are read only on demand in chunks. Decoded APKs commonly use res/layout XML, res/values resources and smali classes; original Kotlin/Java source may not exist.")
             .toString()
@@ -219,27 +229,40 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         return result
     }
 
-    private fun listFiles(relative: String): String {
+    private fun listFiles(relative: String, requestedOffset: Int, requestedLimit: Int): String {
         val folder = if (relative.isBlank() || relative == ".") project else target(relative)
         require(folder.exists() && folder.isDirectory && folder.canRead()) {
             "Folder not found or unreadable: '" + relative + "'. The selected project root is '" + project.absolutePath + "'. Call inspect_project and use one of its exact directory_paths."
         }
+        val offset = requestedOffset.coerceAtLeast(0)
+        val limit = requestedLimit.coerceIn(20,120)
+        val children = folder.listFiles()?.filter { child ->
+            if (child.isDirectory) !child.name.startsWith(".") && child.name !in ignoredDirs else true
+        }?.sortedWith(compareBy<File>({ if (it.isDirectory) 0 else 1 }, { it.name.lowercase() })).orEmpty()
+        val page = children.drop(offset).take(limit)
         val dirs = JSONArray()
         val files = JSONArray()
-        folder.listFiles()?.sortedBy { it.name.lowercase() }?.forEach { child ->
-            if (child.isDirectory && !child.name.startsWith(".") && child.name !in ignoredDirs) {
-                dirs.put(JSONObject().put("name",child.name)
-                    .put("path",child.relativeTo(project).invariantSeparatorsPath))
-            } else if (child.isFile) {
-                files.put(JSONObject().put("name",child.name)
-                    .put("path",child.relativeTo(project).invariantSeparatorsPath)
-                    .put("bytes",child.length()).put("text_candidate",isText(child)))
+        val entries = JSONArray()
+        page.forEach { child ->
+            val path = child.relativeTo(project).invariantSeparatorsPath
+            if (child.isDirectory) {
+                val item = JSONObject().put("type","directory").put("name",child.name).put("path",path)
+                dirs.put(item)
+                entries.put(item)
+            } else {
+                val item = JSONObject().put("type","file").put("name",child.name).put("path",path)
+                    .put("bytes",child.length()).put("text_candidate",isText(child))
+                files.put(item)
+                entries.put(item)
             }
         }
+        val next = offset + page.size
         return JSONObject().put("ok",true).put("project_root",project.absolutePath)
             .put("folder",if(relative.isBlank() || relative == ".") "." else relative)
-            .put("directories",dirs).put("files",files)
-            .put("note","Directory entries include non-text assets. Use read_project_file only for text_candidate=true.")
+            .put("offset",offset).put("limit",limit).put("total_entries",children.size)
+            .put("has_more",next < children.size).put("next_offset",if(next < children.size) next else JSONObject.NULL)
+            .put("entries",entries).put("directories",dirs).put("files",files)
+            .put("note","This is one page only. Continue with next_offset until has_more=false. Directory entries include non-text assets; read only text_candidate=true.")
             .toString()
     }
 
@@ -265,12 +288,24 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         require(isText(file)) { "File is missing, binary, or larger than 2 MB: $relative" }
         val lines = file.readLines(Charsets.UTF_8)
         val from = (start.coerceAtLeast(1)-1).coerceAtMost(lines.size)
-        val until = end.coerceAtLeast(start).coerceAtMost(from+120).coerceAtMost(lines.size)
-        val body = (from until until).joinToString("\n") { i -> "${i+1}: ${lines[i]}" }
-        val next = if (until < lines.size) until + 1 else JSONObject.NULL
+        val until = end.coerceAtLeast(start).coerceAtMost(from+80).coerceAtMost(lines.size)
+        var usedChars = 0
+        val bodyLines = mutableListOf<String>()
+        var actualUntil = from
+        for (i in from until until) {
+            val line = lines[i].take(1200)
+            if (usedChars + line.length > 12000 && bodyLines.isNotEmpty()) break
+            bodyLines.add("${i+1}: ${line}")
+            usedChars += line.length
+            actualUntil = i + 1
+        }
+        val body = bodyLines.joinToString("\n")
+        val next = if (actualUntil < lines.size) actualUntil + 1 else JSONObject.NULL
         return JSONObject().put("ok",true).put("path",relative).put("total_lines",lines.size)
-            .put("start_line",from+1).put("end_line",until).put("has_more",until < lines.size)
-            .put("next_start_line",next).put("content",body).toString()
+            .put("start_line",from+1).put("end_line",actualUntil).put("has_more",actualUntil < lines.size)
+            .put("next_start_line",next).put("content",body)
+            .put("note","Chunks are limited to 80 lines and about 12 KB. Continue from next_start_line.")
+            .toString()
     }
 
     private fun backup(file: File) {
