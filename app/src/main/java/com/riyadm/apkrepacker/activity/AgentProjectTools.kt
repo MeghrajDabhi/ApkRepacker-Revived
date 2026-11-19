@@ -5,6 +5,8 @@ import android.graphics.BitmapFactory
 import android.util.Base64
 import java.io.FileInputStream
 import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
 import com.riyadm.apkrepacker.apktool.ApktoolEngine
 import com.riyadm.apkrepacker.apktool.ApktoolLogListener
 import com.riyadm.apkrepacker.apktool.BuildOptions
@@ -47,8 +49,13 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             objSchema(JSONObject().put("path",str("Relative folder path; empty string means project root."))
                 .put("offset",JSONObject().put("type","integer").put("description","Zero-based page offset; defaults to 0."))
                 .put("limit",JSONObject().put("type","integer").put("description","Page size from 20 to 120; defaults to 80.")),JSONArray())))
-        tools.put(function("search_project_files","Search text content across decoded APK files. Returns bounded matching paths and line excerpts.",
-            schema("query","Text, resource name, class, method, or identifier to search for.")))
+        tools.put(function("search_project_files","Search text content across the selected project in bounded file batches. Use next_offset to continue the search through the entire project; one page is never the full result.",
+            objSchema(JSONObject().put("query",str("Exact text, resource name, class, method or identifier to search for."))
+                .put("offset",JSONObject().put("type","integer").put("description","Zero-based text-file scan offset from the project inventory; defaults to 0."))
+                .put("limit",JSONObject().put("type","integer").put("description","Number of files to scan in this batch, 100 to 1000; defaults to 400.")),JSONArray().put("query"))))
+        tools.put(function("lookup_android_docs","Fetch a relevant official Android developer reference page for Activity, Fragment, layout XML, resources, manifest, Compose or WebView guidance. This explains Android conventions; project-specific file locations must still be verified with local tools.",
+            objSchema(JSONObject().put("topic",str("One of: activity, fragment, layout, resources, manifest, compose, webview, smali."))
+                .put("query",str("Specific Android concept to look up in the documentation.")),JSONArray().put("topic"))))
         tools.put(function("read_project_file","Read a supported text file with line numbers in small chunks. The result includes has_more and next_start_line.",
             objSchema(JSONObject().put("path",str("Project-relative file path."))
                 .put("start_line",JSONObject().put("type","integer").put("description","1-based start line, defaults to 1."))
@@ -118,7 +125,8 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "inspect_project" -> inspectProject()
             "find_gui_files" -> findGuiFiles(args.optString("task_hint",""))
             "list_project_files" -> listFiles(args.optString("path",""),args.optInt("offset",0),args.optInt("limit",80))
-            "search_project_files" -> searchFiles(args.optString("query",""))
+            "search_project_files" -> searchFiles(args.optString("query",""),args.optInt("offset",0),args.optInt("limit",400))
+            "lookup_android_docs" -> lookupAndroidDocs(args.optString("topic",""),args.optString("query",""))
             "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",80))
             "inspect_project_file" -> inspectProjectFile(args.optString("path",""))
             "read_project_binary_chunk" -> readBinaryChunk(args.optString("path",""),args.optLong("offset",0L),args.optInt("length",4096))
@@ -141,12 +149,42 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
     }
 
     private fun target(relative: String): File {
-        require(relative.isNotBlank()) { "A project-relative path is required." }
-        require(!relative.startsWith("/") && !relative.startsWith("\\") && !Regex("^[A-Za-z]:").containsMatchIn(relative)) {
-            "Absolute paths are not allowed."
+        require(relative.isNotBlank()) { "A project-relative path is required. Use an exact path from list_project_files." }
+        val normalized = relative.trim().trim('`','"','\\'').replace('\\\\','/')
+            .removePrefix("./").trim('/')
+        require(normalized.isNotBlank() && !normalized.startsWith("/") &&
+            !Regex("^[A-Za-z]:").containsMatchIn(normalized)) {
+            "Only project-relative paths are allowed."
         }
-        val file = File(project,relative).canonicalFile
-        require(file.toPath().startsWith(project.toPath()) && file != project) { "Rejected path outside the selected project." }
+        val rawParts = normalized.split('/').filter { it.isNotBlank() && it != "." }
+        require(rawParts.none { it == ".." }) { "Parent-directory traversal is not allowed." }
+        var current = project
+        val parts = if (rawParts.firstOrNull()?.equals(project.name,true) == true) rawParts.drop(1) else rawParts
+        for (part in parts) {
+            val children = current.listFiles()
+                ?: error("Cannot enumerate '${current.relativeTo(project).invariantSeparatorsPath}'. Android denied access or the folder is unavailable.")
+            val exact = children.firstOrNull { it.name == part }
+            val match = exact ?: children.filter { it.name.equals(part,true) }.let { matches ->
+                when (matches.size) {
+                    0 -> null
+                    1 -> matches[0]
+                    else -> error("Ambiguous path segment '$part'. Use exact spelling from the directory listing: " +
+                        matches.joinToString { it.name })
+                }
+            }
+            if (match == null) {
+                val suggestions = children.sortedBy { it.name.lowercase() }.take(16)
+                    .joinToString { (if (it.isDirectory) "[DIR] " else "") + it.name }
+                error("Path '$relative' was not found under '${current.relativeTo(project).invariantSeparatorsPath}'. " +
+                    "Actual entries here: " + suggestions + ". Use an exact path from list_project_files.")
+            }
+            require(!java.nio.file.Files.isSymbolicLink(match.toPath())) { "Symbolic-link paths are not followed." }
+            current = match
+        }
+        val file = current.canonicalFile
+        require(file.toPath().startsWith(project.toPath()) && file != project) {
+            "Rejected path outside the selected project."
+        }
         return file
     }
 
@@ -360,23 +398,95 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .toString()
     }
 
-    private fun searchFiles(query: String): String {
+    private fun searchFiles(query: String, requestedOffset: Int, requestedLimit: Int): String {
         require(query.isNotBlank()) { "Enter a search query." }
+        val offset = requestedOffset.coerceAtLeast(0)
+        val limit = requestedLimit.coerceIn(100,1000)
         val matches = JSONArray()
-        var count = 0
-        for (file in allTextFiles().take(1200)) {
-            if (count >= 25) break
-            val lines = runCatching { file.readLines(Charsets.UTF_8) }.getOrNull() ?: continue
-            for ((index,line) in lines.withIndex()) if (line.contains(query,true)) {
-                matches.put(JSONObject().put("path",file.relativeTo(project).invariantSeparatorsPath)
-                    .put("line",index+1).put("text",line.take(240)))
-                count++
-                if (count >= 25) break
+        var scanned = 0
+        for (file in allTextFiles().drop(offset).take(limit)) {
+            scanned++
+            if (matches.length() >= 35) break
+            runCatching {
+                file.useLines(Charsets.UTF_8) { lines ->
+                    var lineNumber = 0
+                    lines.forEach { line ->
+                        lineNumber++
+                        if (matches.length() < 35 && line.contains(query,true)) {
+                            matches.put(JSONObject().put("path",file.relativeTo(project).invariantSeparatorsPath)
+                                .put("line",lineNumber).put("text",line.take(260)))
+                        }
+                    }
+                }
             }
         }
-        return JSONObject().put("query",query).put("matches",matches).put("truncated",count>=25)
-            .put("files_scanned",allTextFiles().take(1200).count())
-            .put("scan_limit",1200).toString()
+        val next = offset + scanned
+        val hasMore = scanned == limit
+        return JSONObject().put("query",query).put("matches",matches)
+            .put("files_scanned",scanned).put("scan_offset",offset).put("has_more",hasMore)
+            .put("next_offset",if (hasMore) next else JSONObject.NULL)
+            .put("note","The search is paginated over all readable text files. Continue with next_offset until has_more=false; do not treat one page as a complete search.")
+            .toString()
+    }
+
+    private fun lookupAndroidDocs(topic: String, query: String): String {
+        val key = topic.trim().lowercase()
+        val pages = mapOf(
+            "activity" to ("Activities" to "https://developer.android.com/guide/components/activities"),
+            "fragment" to ("Fragments" to "https://developer.android.com/guide/fragments"),
+            "layout" to ("Layout resources" to "https://developer.android.com/guide/topics/resources/layout-resource"),
+            "resources" to ("App resources overview" to "https://developer.android.com/guide/topics/resources/providing-resources"),
+            "manifest" to ("App manifest overview" to "https://developer.android.com/guide/topics/manifest/manifest-intro"),
+            "compose" to ("Jetpack Compose documentation" to "https://developer.android.com/develop/ui/compose/documentation"),
+            "webview" to ("Build web apps in WebView" to "https://developer.android.com/develop/ui/views/layout/webapps/webview"),
+            "smali" to ("Apktool documentation" to "https://apktool.org/docs/")
+        )
+        val page = pages[key] ?: pages["resources"]!!
+        var fetched = false
+        var text = ""
+        runCatching {
+            val connection = URL(page.second).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 7000
+            connection.readTimeout = 10000
+            connection.setRequestProperty("User-Agent","ApkRepacker-Android-Agent/1.0")
+            connection.setRequestProperty("Accept","text/html")
+            val html = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText().take(900000) }
+            connection.disconnect()
+            val cleaned = html
+                .replace(Regex("(?is)<script[^>]*>.*?</script>")," ")
+                .replace(Regex("(?is)<style[^>]*>.*?</style>")," ")
+                .replace(Regex("(?i)</(p|li|h[1-6]|tr|section|div)>"),"\\n")
+                .replace(Regex("<[^>]+>")," ")
+                .replace("&nbsp;"," ").replace("&amp;","&").replace("&lt;","<")
+                .replace("&gt;",">").replace("&quot;","\"").replace("&#39;","'")
+                .replace(Regex("[ \\t]+")," ").replace(Regex("\\n{3,}"),"\\n\\n")
+            val terms = (query.lowercase().split(Regex("[^a-z0-9]+")) + key)
+                .filter { it.length > 2 }.distinct()
+            val paragraphs = cleaned.split(Regex("\\n+")).map { it.trim() }.filter { it.length > 50 }
+            val ranked = paragraphs.map { paragraph ->
+                paragraph to terms.count { paragraph.contains(it,true) }
+            }.sortedByDescending { it.second }
+            text = ranked.filter { it.second > 0 }.take(7).joinToString("\\n\\n") { it.first.take(900) }
+                .ifBlank { paragraphs.take(5).joinToString("\\n\\n") { it.take(900) } }.take(5200)
+            fetched = text.isNotBlank()
+        }
+        val fallback = when(key) {
+            "activity" -> "An Activity is an app component that provides a window for a user interface. Find the declared activity in AndroidManifest.xml, resolve its class to a Java/Kotlin or decoded Smali path, then trace setContentView, layout inflation or Compose setContent."
+            "fragment" -> "A Fragment owns a portion of a UI. Trace the host Activity and FragmentTransaction/NavHost, then inspect the Fragment's onCreateView/layout inflater or ComposeView. Do not assume a corresponding layout XML exists."
+            "layout" -> "Classic View layouts are XML files under res/layout and qualified variants such as res/layout-land. Their basename is the layout resource name. Trace setContentView(R.layout.name), inflate(R.layout.name) or Smali R$layout references from the actual Activity/Fragment."
+            "resources" -> "Android resources live under typed res subdirectories: layout, drawable, mipmap, values, menu, xml, raw and font. Values XML can contain strings, colors, dimensions, styles and themes. Assets are separate from res and keep their original directory paths."
+            "manifest" -> "AndroidManifest.xml declares app components, intent filters, themes and metadata. Resolve fully qualified component names and then find their corresponding code or Smali files."
+            "compose" -> "Jetpack Compose UI is generally declared in Kotlin source through @Composable functions and setContent; decoded APKs may expose only DEX/Smali, not original Kotlin source."
+            "webview" -> "A WebView UI can load local HTML/CSS/JavaScript from assets or a URL. Inspect WebView.loadUrl/loadData references and trace the actual asset paths."
+            else -> "Apktool decodes DEX bytecode into Smali and resources into decoded folders. Original Java/Kotlin source is not guaranteed to be present. Trace manifest component names, Smali class references and resource identifiers."
+        }
+        JSONObject().put("topic",key).put("title",page.first).put("url",page.second)
+            .put("fetched_from_internet",fetched).put("query",query)
+            .put("documentation_excerpt",if (fetched) text else fallback)
+            .put("fallback_explanation",fallback)
+            .put("important","Official docs describe Android conventions, not this APK's exact files. Use local project tools to verify exact paths and references.")
+            .toString()
     }
 
     private fun readFile(relative: String, start: Int, end: Int): String {
