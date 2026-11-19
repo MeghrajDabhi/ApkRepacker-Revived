@@ -1,0 +1,28 @@
+name: Build Meghraj AI Windows Agent
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/windows-agent.yml'
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish Windows x64 app
+        run: dotnet publish desktop/MeghrajAgent/MeghrajAgent.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+      - name: Upload desktop app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Meghraj-AI-Desktop-Windows-x64
+          path: publish/**
+          if-no-files-found: error
+          retention-days: 14
