@@ -358,7 +358,7 @@ class MeghrajAiActivity : BaseActivity() {
             """You are a coding agent operating on the user's selected, decoded Android APK project.
 You have local tools that inspect and edit the actual files. Do not return code for the user to copy.
 For every requested project change, FIRST call inspect_project. Then call find_gui_files with the user's task description. Use only exact paths returned by those tools; never assume a MainActivity.kt, res/layout or any folder exists. The initial inventory is deliberately only a small first page. For large folders, call list_project_files with offset=0 and then follow next_offset until has_more=false; never conclude that a folder has no files from one page. If any tool returns ok=false or a path error, inspect the actual root, list the root with an empty path, and continue using exact returned paths. Search for visible labels, resource IDs, launcher Activity declarations and layout references; read relevant files in 80-line/12-KB chunks, continuing with next_start_line while has_more is true. For a GUI color change, inspect layout XML plus values/colors.xml, styles.xml/themes.xml and relevant drawable resources before choosing the source of the color. Then apply focused edits directly to the decoded project, using apply_multi_file_patches when several existing files must change together, and rebuild. Never return code for the user to copy.
-After edits, inspect relevant changed files and call build_project to compile the APK. If the build fails, analyze the actual errors, make a focused fix, and retry (maximum 2 build attempts). Never claim a build succeeded unless the build tool confirms it.
+After edits, inspect relevant changed files and call build_project to compile the APK. If the build fails, analyze the actual errors, make a focused fix, and retry (maximum 3 build attempts). Never claim a build succeeded unless the build tool confirms it.
 This is HYBRID mode: safe source/resource edits may be applied automatically. The app asks the user before manifest edits or file deletion. Do not add permissions, change package identity, weaken app security, or alter signing settings unless the user explicitly requested it. Never read or expose API keys, private signing keys, credentials, or unrelated personal files.
 Only work inside the selected project. Use rollback_last_changes if you need to undo your own changes. Keep tool calls focused and final report concise. The APK is rebuilt unsigned; do not claim it is installed or signed."""
         ))
@@ -502,7 +502,6 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     addMessage("agent", "FILE DELETED · " + args.optString("path") + " (backup retained).")
                 }
                 messages.put(JSONObject().put("role","tool").put("tool_call_id",callId).put("name",name).put("content",result))
-                if (completedToolCalls >= 96) break
             }
             if (messages.length() > 8 || messages.toString().length > 32000) compactAgentMessages(messages, cycleStart, completedToolCalls)
             if (buildAttempts >= 3) {
@@ -519,18 +518,9 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
      * Older file contents are intentionally dropped; the agent can reread any file by path.
      */
     private fun compactAgentMessages(messages: JSONArray, cycleStart: Int, completed: Int) {
+        // The user message carries the durable task, verified preflight and prior journal.
+        // Only the current assistant tool-call batch and its matching outputs remain as raw history.
         val context = StringBuilder(messages.optJSONObject(1)?.optString("content").orEmpty())
-        val preflight = messages.optJSONObject(2)
-        val priorJournal = messages.optJSONObject(3)
-        if (preflight?.optString("role") == "assistant") {
-            context.append("\\n\\nVERIFIED PROJECT PREFLIGHT (preserved):\\n")
-                .append(preflight.optString("content").take(7000))
-        }
-        if (priorJournal?.optString("role") == "assistant") {
-            val previous = priorJournal.optString("content", "")
-            val marker = previous.indexOf("WORKSPACE TASK JOURNAL")
-            if (marker >= 0) context.append("\\n\\n").append(previous.substring(marker).take(1800))
-        }
         context.append("\\n\\nWORKSPACE TASK JOURNAL (older tool payloads compacted; reread exact files when needed):\\n")
         for (i in 2 until cycleStart) {
             val item = messages.optJSONObject(i) ?: continue
