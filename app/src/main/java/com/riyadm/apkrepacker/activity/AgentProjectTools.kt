@@ -152,7 +152,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         }
         val directoryPaths = JSONArray()
         project.walkTopDown().onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
-            .filter { it.isDirectory && it != project }.take(500).forEach {
+            .filter { it.isDirectory && it != project }.take(150).forEach {
                 directoryPaths.put(it.relativeTo(project).invariantSeparatorsPath)
             }
         val important = listOf("AndroidManifest.xml","apktool.yml","res/values/strings.xml",
@@ -221,7 +221,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             }
             tokens.forEach { token -> if (lower.contains(token)) { score += 20; reasons.add("Matches task keyword " + token) } }
             if (score == 0) null else Triple(path,score,reasons.distinct())
-        }.sortedByDescending { it.second }.take(100)
+        }.sortedByDescending { it.second }.take(60)
         val result = JSONArray()
         ranked.forEach { (path,score,reasons) ->
             result.put(JSONObject().put("path",path).put("score",score).put("reasons",JSONArray(reasons)))
@@ -235,7 +235,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "Folder not found or unreadable: '" + relative + "'. The selected project root is '" + project.absolutePath + "'. Call inspect_project and use one of its exact directory_paths."
         }
         val offset = requestedOffset.coerceAtLeast(0)
-        val limit = requestedLimit.coerceIn(20,120)
+        val limit = requestedLimit.coerceIn(20,80)
         val children = folder.listFiles()?.filter { child ->
             if (child.isDirectory) !child.name.startsWith(".") && child.name !in ignoredDirs else true
         }?.sortedWith(compareBy<File>({ if (it.isDirectory) 0 else 1 }, { it.name.lowercase() })).orEmpty()
@@ -271,13 +271,13 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val matches = JSONArray()
         var count = 0
         for (file in allTextFiles().take(1200)) {
-            if (count >= 40) break
+            if (count >= 25) break
             val lines = runCatching { file.readLines(Charsets.UTF_8) }.getOrNull() ?: continue
             for ((index,line) in lines.withIndex()) if (line.contains(query,true)) {
                 matches.put(JSONObject().put("path",file.relativeTo(project).invariantSeparatorsPath)
-                    .put("line",index+1).put("text",line.take(360)))
+                    .put("line",index+1).put("text",line.take(240)))
                 count++
-                if (count >= 40) break
+                if (count >= 25) break
             }
         }
         return JSONObject().put("query",query).put("matches",matches).put("truncated",count>=40).toString()
