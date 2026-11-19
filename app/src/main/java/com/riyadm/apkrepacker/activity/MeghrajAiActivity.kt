@@ -65,7 +65,7 @@ class MeghrajAiActivity : BaseActivity() {
                 status.text = "Indexing every file in the selected project…"
                 val context = withContext(Dispatchers.IO) { readContext(instruction) }
                 status.text = "Sending project index and source context to OpenRouter…"
-                val answer = withContext(Dispatchers.IO) { requestAi(token, modelId, AiConfig.getProvider(this), AiConfig.getBaseUrl(this), instruction, context) }
+                val answer = withContext(Dispatchers.IO) { requestAi(token, modelId, AiConfig.getProvider(this@MeghrajAiActivity), AiConfig.getBaseUrl(this@MeghrajAiActivity), instruction, context) }
                 val json = JSONObject(answer)
                 val changes = json.optJSONArray("changes") ?: error("AI response did not contain a changes array.")
                 if (changes.length() == 0) {
@@ -184,3 +184,49 @@ Use the complete file index to identify correct existing source files. Only retu
         return normalized
     }
 
+
+
+    /**
+     * Applies only reviewed replacements to files already present inside the selected project.
+     * Each original file is copied to a .meghraj-ai-backup file before replacement.
+     */
+    private fun applyChanges() {
+        val changes = proposed?.optJSONArray("changes") ?: run {
+            status.text = "There are no approved changes to apply."
+            return
+        }
+        var applied = 0
+        try {
+            for (i in 0 until changes.length()) {
+                val item = changes.getJSONObject(i)
+                val relative = item.getString("path")
+                val content = item.getString("content")
+                require(relative.isNotBlank()) { "AI returned an empty file path." }
+                val target = File(project, relative).canonicalFile
+                require(target.toPath().startsWith(project.canonicalFile.toPath())) {
+                    "Rejected path outside project: $relative"
+                }
+                require(target.isFile) { "Only existing files can currently be replaced: $relative" }
+                require(!target.name.endsWith(".meghraj-ai-backup")) { "Invalid backup target." }
+                val backup = File(target.parentFile, target.name + ".meghraj-ai-backup")
+                if (!backup.exists()) target.copyTo(backup, overwrite = false)
+                val temp = File(target.parentFile, target.name + ".meghraj-ai.tmp")
+                temp.writeText(content, Charsets.UTF_8)
+                if (!temp.renameTo(target)) {
+                    target.writeText(content, Charsets.UTF_8)
+                    temp.delete()
+                }
+                applied++
+            }
+            proposed = null
+            status.text = "Applied $applied file change(s). Backups were preserved. Rebuild to test."
+        } catch (e: Exception) {
+            status.text = "Could not apply all changes after $applied file(s): " +
+                (e.message ?: e.javaClass.simpleName)
+        }
+    }
+
+    companion object {
+        const val EXTRA_PROJECT_PATH = "projectPatch"
+    }
+}
