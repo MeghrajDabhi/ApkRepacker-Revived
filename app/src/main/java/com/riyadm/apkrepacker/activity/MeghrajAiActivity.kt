@@ -387,10 +387,13 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                 val args = runCatching { JSONObject(fn.optString("arguments","{}")) }
                     .getOrElse { error("Invalid arguments for $name: ${it.message}") }
                 val summary = when(name) {
+                    "inspect_project" -> "Mapping the selected APK project"
+                    "find_gui_files" -> "Finding the actual GUI and Activity files"
                     "list_project_files" -> "Exploring project files"
                     "search_project_files" -> "Searching source and resources"
                     "read_project_file" -> "Reading " + args.optString("path")
                     "apply_file_patch" -> "Editing " + args.optString("path")
+                    "apply_multi_file_patches" -> "Applying a multi-file change"
                     "create_project_file" -> "Creating " + args.optString("path")
                     "delete_project_file" -> "Deleting " + args.optString("path")
                     "build_project" -> "Building decoded APK"
@@ -400,11 +403,17 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                 status.text = summary + "..."
                 val approvalText = runtime.requiresApproval(name,args)
                 val approvalDetails = if (approvalText != null) {
-                    val preview = if (name == "apply_file_patch") {
-                        "\n\nFile: " + args.optString("path") +
+                    val preview = when (name) {
+                        "apply_file_patch" -> "\n\nFile: " + args.optString("path") +
                             "\n\nBEFORE:\n" + args.optString("old_text").take(900) +
                             "\n\nAFTER:\n" + args.optString("new_text").take(900)
-                    } else "\n\nFile: " + args.optString("path")
+                        "apply_multi_file_patches" -> {
+                            val patches = args.optJSONArray("patches") ?: JSONArray()
+                            val names = (0 until patches.length()).mapNotNull { patches.optJSONObject(it)?.optString("path") }
+                            "\n\nFiles in this transaction:\n" + names.joinToString("\n")
+                        }
+                        else -> "\n\nFile: " + args.optString("path")
+                    }
                     approvalText + preview
                 } else null
                 val approved = if (approvalDetails != null) confirmAgentAction(approvalDetails) else true
@@ -423,6 +432,22 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     addMessage("agent", "FILE DIFF · " + args.optString("path") +
                         "\n- " + oldText.replace("\n","\n- ") +
                         "\n+ " + newText.replace("\n","\n+ "))
+                } else if (name == "apply_multi_file_patches" && approved) {
+                    val paths = runCatching { JSONObject(result).optJSONArray("paths") }.getOrNull()
+                    val names = paths?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }.orEmpty()
+                    addMessage("agent", "MULTI-FILE PATCH APPLIED · " + names.size + " file(s)\n" + names.joinToString("\n"))
+                } else if (runCatching { JSONObject(result).optBoolean("ok") }.getOrDefault(true).not()) {
+                    val recovery = runCatching { JSONObject(result).optString("recovery") }.getOrDefault("")
+                    addMessage("agent", "TOOL RECOVERY · " + runCatching { JSONObject(result).optString("error") }.getOrDefault("Tool error") +
+                        if (recovery.isNotBlank()) "\n" + recovery else "")
+                } else if (name == "inspect_project") {
+                    val info = runCatching { JSONObject(result) }.getOrNull()
+                    addMessage("agent", "PROJECT SCANNED · " + (info?.optInt("readable_text_files") ?: 0) +
+                        " readable text files indexed. Root: " + (info?.optString("project_root") ?: project.name))
+                } else if (name == "find_gui_files") {
+                    val candidates = runCatching { JSONObject(result).optJSONArray("candidates") }.getOrNull()
+                    val paths = candidates?.let { arr -> (0 until minOf(8,arr.length())).mapNotNull { arr.optJSONObject(it)?.optString("path") } }.orEmpty()
+                    addMessage("agent", "GUI FILE DISCOVERY · " + paths.size + " top candidates\n" + paths.joinToString("\n"))
                 } else if (name == "build_project") {
                     val buildResult = runCatching { JSONObject(result) }.getOrNull()
                     if (buildResult?.optBoolean("success") == true) {
