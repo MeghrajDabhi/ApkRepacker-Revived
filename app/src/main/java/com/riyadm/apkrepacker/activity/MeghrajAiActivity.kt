@@ -514,34 +514,37 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
      * Older file contents are intentionally dropped; the agent can reread any file by path.
      */
     private fun compactAgentMessages(messages: JSONArray, cycleStart: Int, completed: Int) {
-        val journal = StringBuilder("WORKSPACE TASK JOURNAL (older tool payloads compacted; reread exact files when needed):\\n")
+        val context = StringBuilder(messages.optJSONObject(1)?.optString("content").orEmpty())
         val preflight = messages.optJSONObject(2)
         val priorJournal = messages.optJSONObject(3)
         if (preflight?.optString("role") == "assistant") {
-            journal.append("Verified project inventory is preserved in the preceding assistant message.\\n")
+            context.append("\\n\\nVERIFIED PROJECT PREFLIGHT (preserved):\\n")
+                .append(preflight.optString("content").take(7000))
         }
         if (priorJournal?.optString("role") == "assistant") {
             val previous = priorJournal.optString("content", "")
             val marker = previous.indexOf("WORKSPACE TASK JOURNAL")
-            if (marker >= 0) journal.append(previous.substring(marker).take(1800)).append("\\n")
+            if (marker >= 0) context.append("\\n\\n").append(previous.substring(marker).take(1800))
         }
+        context.append("\\n\\nWORKSPACE TASK JOURNAL (older tool payloads compacted; reread exact files when needed):\\n")
         for (i in 2 until cycleStart) {
             val item = messages.optJSONObject(i) ?: continue
             if (item.optString("role") != "tool") continue
             val name = item.optString("name", "tool")
             val content = item.optString("content", "").replace(Regex("\\\\s+"), " ").take(180)
-            if (journal.length < 5000) journal.append("- ").append(name).append(": ").append(content).append("\\n")
+            if (context.length < 26000) context.append("- ").append(name).append(": ").append(content).append("\\n")
         }
+        context.append("\\nContinue the same task. Completed tool actions: ").append(completed)
+            .append(". The selected project remains available through local tools.")
         val currentCycle = (cycleStart until messages.length()).mapNotNull { messages.optJSONObject(it) }
         val system = messages.optJSONObject(0)
         val user = messages.optJSONObject(1)
         while (messages.length() > 0) messages.remove(messages.length() - 1)
         if (system != null) messages.put(system)
-        if (user != null) messages.put(user)
-        if (preflight?.optString("role") == "assistant") messages.put(preflight)
-        messages.put(JSONObject().put("role","assistant").put("content",
-            journal.toString() + "\\nContinue the same task. Completed tool actions: " + completed +
-            ". The selected project remains available through local tools."))
+        if (user != null) {
+            user.put("content", context.toString())
+            messages.put(user)
+        }
         currentCycle.forEach { messages.put(it) }
     }
 
