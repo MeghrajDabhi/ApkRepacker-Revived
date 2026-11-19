@@ -27,7 +27,11 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
 
     fun definitions(): JSONArray {
         val tools = JSONArray()
-        tools.put(function("list_project_files","List source/resource files under a project folder. Use this to explore the decoded APK.",
+        tools.put(function("inspect_project","REQUIRED FIRST STEP. Inspect the real selected APK project root, actual folders, manifest, resources, file counts and likely GUI entry points. Never guess folder names.",
+            objSchema(JSONObject(),JSONArray())))
+        tools.put(function("find_gui_files","Find actual GUI files: layout XML, themes, colors, dimensions, drawables, menus, Compose sources, WebView assets and Activity/Smali entry points. Returns ranked exact paths.",
+            objSchema(JSONObject().put("task_hint",str("Optional task description such as main screen, settings screen or button colors.")),JSONArray())))
+        tools.put(function("list_project_files","List source/resource files under a project folder. Empty path means project root. If a guessed folder is missing, use returned real folders and suggestions.",
             schema("path","Relative folder path; empty string means project root.")))
         tools.put(function("search_project_files","Search text content across decoded APK files. Returns bounded matching paths and line excerpts.",
             schema("query","Text, resource name, class, method, or identifier to search for.")))
@@ -114,6 +118,66 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
     private fun allTextFiles(): Sequence<File> = project.walkTopDown()
         .onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
         .filter { isText(it) }
+
+    private fun inspectProject(): String {
+        val directories = JSONArray()
+        project.listFiles()?.filter { it.isDirectory }?.sortedBy { it.name }?.forEach { dir ->
+            val children = dir.listFiles().orEmpty()
+            directories.put(JSONObject().put("name",dir.name)
+                .put("direct_files",children.count { it.isFile })
+                .put("subdirectories",JSONArray(children.filter { it.isDirectory }.map { it.name }.sorted())))
+        }
+        val important = listOf("AndroidManifest.xml","apktool.yml","res/values/strings.xml",
+            "res/values/styles.xml","res/values/themes.xml").filter { File(project,it).isFile }
+        val count = allTextFiles().take(6001).count()
+        return JSONObject().put("ok",true).put("project_name",project.name)
+            .put("project_root",project.absolutePath).put("readable",project.canRead())
+            .put("root_directories",directories).put("important_files",JSONArray(important))
+            .put("readable_text_files",count).put("count_capped",count > 6000)
+            .put("gui_candidates",guiCandidates(""))
+            .put("note","Decoded APKs commonly use res/layout XML, res/values theme/color XML, drawable assets and smali classes. Original Kotlin/Java source may not exist.")
+            .toString()
+    }
+
+    private fun findGuiFiles(hint: String): String =
+        JSONObject().put("ok",true).put("task_hint",hint).put("project_root",project.absolutePath)
+            .put("candidates",guiCandidates(hint))
+            .put("instruction","Read exact candidate files before editing. Use returned paths; do not invent MainActivity.kt.")
+            .toString()
+
+    private fun guiCandidates(hint: String): JSONArray {
+        val tokens = hint.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length > 2 }
+        val ranked = allTextFiles().take(6000).mapNotNull { file ->
+            val path = file.relativeTo(project).invariantSeparatorsPath
+            val lower = path.lowercase()
+            var score = 0
+            val reasons = mutableListOf<String>()
+            when {
+                lower == "androidmanifest.xml" -> { score += 80; reasons.add("Manifest declares app activities") }
+                lower.startsWith("res/layout") && lower.endsWith(".xml") -> { score += 100; reasons.add("Android view layout") }
+                lower.startsWith("res/values") && lower.endsWith(".xml") &&
+                    listOf("theme","style","color","dimens","attr").any { lower.contains(it) } ->
+                    { score += 90; reasons.add("Theme, color, style or dimension resources") }
+                lower.startsWith("res/drawable") || lower.startsWith("res/mipmap") ->
+                    { score += 45; reasons.add("Drawable or app icon resources") }
+                lower.startsWith("res/menu") -> { score += 60; reasons.add("Menu/navigation resources") }
+                lower.startsWith("assets/") && listOf(".html",".css",".js").any { lower.endsWith(it) } ->
+                    { score += 70; reasons.add("WebView interface asset") }
+                lower.contains("mainactivity") || lower.contains("launcheractivity") ->
+                    { score += 110; reasons.add("Likely main/launcher Activity") }
+                lower.endsWith(".kt") || lower.endsWith(".java") ->
+                    { score += 65; reasons.add("Original source code") }
+                lower.endsWith(".smali") -> { score += 30; reasons.add("Decoded Smali class") }
+            }
+            tokens.forEach { token -> if (lower.contains(token)) { score += 20; reasons.add("Matches task keyword " + token) } }
+            if (score == 0) null else Triple(path,score,reasons.distinct())
+        }.sortedByDescending { it.second }.take(100)
+        val result = JSONArray()
+        ranked.forEach { (path,score,reasons) ->
+            result.put(JSONObject().put("path",path).put("score",score).put("reasons",JSONArray(reasons)))
+        }
+        return result
+    }
 
     private fun listFiles(relative: String): String {
         val folder = if (relative.isBlank()) project else target(relative)
