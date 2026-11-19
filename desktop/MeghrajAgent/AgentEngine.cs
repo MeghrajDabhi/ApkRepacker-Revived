@@ -45,7 +45,7 @@ public sealed class AgentEngine
         };
         for(int step=0;step<40;step++) {
             var payload=new JsonObject { ["model"]=model,["messages"]=messages.DeepClone(),["tools"]=Tools(),["tool_choice"]="auto",["temperature"]=0.1,["max_tokens"]=3000 };
-            using var req=new HttpRequestMessage(HttpMethod.Post,api+"/chat/completions);
+            using var req=new HttpRequestMessage(HttpMethod.Post,api+"/chat/completions");
             req.Headers.Authorization=new AuthenticationHeaderValue("Bearer",token);
             req.Content=new StringContent(payload.ToJsonString(),Encoding.UTF8,"application/json");
             using var response=await http.SendAsync(req); var body=await response.Content.ReadAsStringAsync();
