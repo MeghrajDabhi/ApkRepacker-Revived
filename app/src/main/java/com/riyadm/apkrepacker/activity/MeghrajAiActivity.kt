@@ -357,7 +357,7 @@ class MeghrajAiActivity : BaseActivity() {
         messages.put(JSONObject().put("role", "system").put("content",
             """You are a coding agent operating on the user's selected, decoded Android APK project.
 You have local tools that inspect and edit the actual files. Do not return code for the user to copy.
-For every requested project change, FIRST call inspect_project. Then call find_gui_files with the user's task description. Use only exact paths returned by those tools; never assume a MainActivity.kt, res/layout or any folder exists. If any tool returns ok=false or a path error, do not stop or tell the user you lack access: inspect the returned root_directories/path suggestions, list the real root with an empty path, and continue. Search for visible labels, resource IDs, launcher Activity declarations and layout references; read the exact candidate files in 300-line chunks, continuing with start_line/end_line when has_more is true. For a GUI color change, inspect layout XML plus values/colors.xml, styles.xml/themes.xml and relevant drawable resources before choosing the source of the color. Then apply focused edits directly to the decoded project, using apply_multi_file_patches when several existing files must change together, and rebuild. Never return code for the user to copy.
+For every requested project change, FIRST call inspect_project. Then call find_gui_files with the user's task description. Use only exact paths returned by those tools; never assume a MainActivity.kt, res/layout or any folder exists. If any tool returns ok=false or a path error, do not stop or tell the user you lack access: inspect the returned root_directories/path suggestions, list the real root with an empty path, and continue. Search for visible labels, resource IDs, launcher Activity declarations and layout references; read the exact candidate files in 120-line chunks, continuing with next_start_line while has_more is true. For a GUI color change, inspect layout XML plus values/colors.xml, styles.xml/themes.xml and relevant drawable resources before choosing the source of the color. Then apply focused edits directly to the decoded project, using apply_multi_file_patches when several existing files must change together, and rebuild. Never return code for the user to copy.
 After edits, inspect relevant changed files and call build_project to compile the APK. If the build fails, analyze the actual errors, make a focused fix, and retry (maximum 2 build attempts). Never claim a build succeeded unless the build tool confirms it.
 This is HYBRID mode: safe source/resource edits may be applied automatically. The app asks the user before manifest edits or file deletion. Do not add permissions, change package identity, weaken app security, or alter signing settings unless the user explicitly requested it. Never read or expose API keys, private signing keys, credentials, or unrelated personal files.
 Only work inside the selected project. Use rollback_last_changes if you need to undo your own changes. Keep tool calls focused and final report concise. The APK is rebuilt unsigned; do not claim it is installed or signed."""
@@ -368,7 +368,8 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
         val toolDefinitions = runtime.definitions()
         var completedToolCalls = 0
         var buildAttempts = 0
-        while (completedToolCalls < 24) {
+        while (completedToolCalls < 64) {
+            val cycleStart = messages.length()
             status.text = "Agent thinking · step " + (completedToolCalls + 1) + " · " + provider
             val assistant = withContext(Dispatchers.IO) {
                 requestToolTurn(token, modelId, provider, baseUrl, messages, toolDefinitions)
@@ -465,14 +466,41 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     addMessage("agent", "FILE DELETED · " + args.optString("path") + " (backup retained).")
                 }
                 messages.put(JSONObject().put("role","tool").put("tool_call_id",callId).put("name",name).put("content",result))
-                if (completedToolCalls >= 24) break
+                if (completedToolCalls >= 64) break
             }
+            if (messages.length() > 18) compactAgentMessages(messages, cycleStart, completedToolCalls)
             if (buildAttempts >= 3) {
                 messages.put(JSONObject().put("role","system").put("content",
                     "Build retry limit reached. Stop building and report the remaining errors accurately."))
             }
         }
-        return "The Agent reached its 24-tool safety limit. Review the activity log; any applied changes have session backups and can be rolled back."
+        return "The Agent reached its 64-action session safety limit. This is a runaway-task guard, not a provider token limit. The activity log shows completed actions; applied edits have session backups and can be rolled back."
+    }
+
+    /**
+     * Keep the system prompt, task, a compact action journal, and the current tool-call cycle.
+     * This prevents every later API request from resending the entire project-reading transcript.
+     * Older file contents are intentionally dropped; the agent can reread any file by path.
+     */
+    private fun compactAgentMessages(messages: JSONArray, cycleStart: Int, completed: Int) {
+        val journal = StringBuilder("Previous local tool actions (older file contents were compacted; reread files if needed):\n")
+        for (i in 2 until cycleStart) {
+            val item = messages.optJSONObject(i) ?: continue
+            if (item.optString("role") != "tool") continue
+            val name = item.optString("name", "tool")
+            val content = item.optString("content", "").replace(Regex("\\s+"), " ").take(220)
+            if (journal.length < 2800) journal.append("- ").append(name).append(": ").append(content).append("\n")
+        }
+        val currentCycle = (cycleStart until messages.length()).mapNotNull { messages.optJSONObject(it) }
+        val system = messages.optJSONObject(0)
+        val user = messages.optJSONObject(1)
+        while (messages.length() > 0) messages.remove(messages.length() - 1)
+        if (system != null) messages.put(system)
+        if (user != null) messages.put(user)
+        messages.put(JSONObject().put("role","assistant").put("content",
+            journal.toString() + "\nContinue the same task. Tool action count: " + completed +
+            ". The selected project remains available through local tools."))
+        currentCycle.forEach { messages.put(it) }
     }
 
     private suspend fun confirmAgentAction(message: String): Boolean =
