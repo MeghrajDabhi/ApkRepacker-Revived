@@ -631,9 +631,18 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     }
                     apiMessages.put(JSONObject().put("role", "assistant").put("content", blocks))
                 }
-                "tool" -> apiMessages.put(JSONObject().put("role", "user").put("content", JSONArray().put(
-                    JSONObject().put("type", "tool_result").put("tool_use_id", message.optString("tool_call_id"))
-                        .put("content", message.optString("content")))))
+                "tool" -> {
+                    val resultBlock = JSONObject().put("type", "tool_result")
+                        .put("tool_use_id", message.optString("tool_call_id"))
+                        .put("content", message.optString("content"))
+                    val previous = if (apiMessages.length() > 0) apiMessages.optJSONObject(apiMessages.length() - 1) else null
+                    val previousContent = previous?.opt("content")
+                    if (previous?.optString("role") == "user" && previousContent is JSONArray) {
+                        previousContent.put(resultBlock)
+                    } else {
+                        apiMessages.put(JSONObject().put("role", "user").put("content", JSONArray().put(resultBlock)))
+                    }
+                }
             }
         }
         val anthropicTools = JSONArray()
@@ -731,9 +740,18 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     }
                     contents.put(JSONObject().put("role", "model").put("parts", parts))
                 }
-                "tool" -> contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(
-                    JSONObject().put("functionResponse", JSONObject().put("name", message.optString("name"))
-                        .put("response", JSONObject().put("result", message.optString("content")))))))
+                "tool" -> {
+                    val responsePart = JSONObject().put("functionResponse",
+                        JSONObject().put("name", message.optString("name"))
+                            .put("response", JSONObject().put("result", message.optString("content"))))
+                    val previous = if (contents.length() > 0) contents.optJSONObject(contents.length() - 1) else null
+                    val previousParts = previous?.optJSONArray("parts")
+                    if (previous?.optString("role") == "user" && previousParts != null) {
+                        previousParts.put(responsePart)
+                    } else {
+                        contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(responsePart)))
+                    }
+                }
             }
         }
         val declarations = JSONArray()
