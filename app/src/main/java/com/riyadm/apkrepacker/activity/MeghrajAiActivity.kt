@@ -378,6 +378,11 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
             "Selected project could not be indexed. Root: " + project.absolutePath +
                 " · " + inspection.optString("error", "The folder is not readable.")
         }
+        require(inspection.optInt("total_project_files", 0) > 0) {
+            "The selected folder is readable, but the Agent found zero project files.\nRoot: " +
+                project.absolutePath + "\nFirst root listing: " + rootListing.toString().take(2400) +
+                "\nReopen the decoded APK from the editor so the Agent receives its actual project directory."
+        }
         messages.put(JSONObject().put("role","assistant").put("content",
             "AUTOMATIC LOCAL PROJECT PREFLIGHT (verified by the app, not guessed by the model):\n" +
                 JSONObject().put("project",JSONObject()
