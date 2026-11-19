@@ -55,6 +55,16 @@ class SettingsFragment : RevivedPreferenceFragment(),
 
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         setPreferencesFromResource(R.xml.peference, rootKey)
+        val aiPreference = Preference(requireContext()).apply {
+            key = "meghraj_ai_settings"
+            title = "Meghraj AI"
+            summary = "Configure OpenRouter API key and choose an AI model"
+            setOnPreferenceClickListener {
+                startActivity(android.content.Intent(requireContext(), com.riyadm.apkrepacker.activity.MeghrajAiSettingsActivity::class.java))
+                true
+            }
+        }
+        preferenceScreen.addPreference(aiPreference)
 
         val autoMode = themeManager.themeMode == Theme.Mode.AUTO_LIGHT_DARK
 
