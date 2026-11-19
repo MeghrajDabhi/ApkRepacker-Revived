@@ -18,7 +18,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
     private lateinit var models: Spinner
     private lateinit var status: TextView
     private val modelIds = mutableListOf<String>()
-    private val providers = listOf("OpenRouter", "OpenAI", "DeepSeek", "NVIDIA NIM", "Custom")
+    private val providers = listOf("OpenRouter", "OpenAI", "DeepSeek", "NVIDIA NIM", "AgentRouter", "Custom")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
