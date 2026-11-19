@@ -73,7 +73,7 @@ class AppEditorActivity : BaseActivity() {
         setSupportActionBar(binding.toolbar)
         supportActionBar?.setDisplayShowTitleEnabled(false)
         binding.toolbar.setNavigationOnClickListener { finish() }
-        binding.agentFab.setOnClickListener {
+        binding.root.findViewById<View>(R.id.agent_fab)?.setOnClickListener {
             startActivity(Intent(this@AppEditorActivity, MeghrajAiActivity::class.java)
                 .putExtra(MeghrajAiActivity.EXTRA_PROJECT_PATH, path))
         }
