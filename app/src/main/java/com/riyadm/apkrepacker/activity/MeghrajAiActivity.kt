@@ -37,8 +37,8 @@ class MeghrajAiActivity : BaseActivity() {
             text = "Project: " + project.name + "\nOnly selected text files are sent to OpenRouter when you submit. The APK itself stays on this device. AI edits are previewed before applying."
             textSize = 13f; setPadding(0, 12, 0, 16)
         })
-        key = edit("OpenRouter API key", true).also(body::addView)
-        model = edit("Model ID").also { it.setText("openrouter/auto"); body.addView(it) }
+        key = edit("OpenRouter API key", true).also { it.setText(AiConfig.getKey(this)); body.addView(it) }
+        model = edit("Model ID").also { it.setText(AiConfig.getModel(this)); body.addView(it) }
         task = edit("Describe what you want changed", false, true).also(body::addView)
         run = Button(this).apply { text = "Ask AI to modify this project"; setOnClickListener { ask() } }
         body.addView(run)
