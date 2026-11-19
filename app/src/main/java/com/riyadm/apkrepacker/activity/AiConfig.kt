@@ -67,6 +67,7 @@ internal object AiConfig {
         "DeepSeek" -> "https://api.deepseek.com"
         "NVIDIA NIM" -> "https://integrate.api.nvidia.com/v1"
         "OpenRouter" -> "https://openrouter.ai/api/v1"
+        "AgentRouter" -> "https://agentrouter.org/v1"
         "Custom" -> "https://example.com/v1"
         else -> "https://openrouter.ai/api/v1"
     }
