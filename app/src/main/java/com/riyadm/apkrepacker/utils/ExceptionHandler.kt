@@ -170,10 +170,25 @@ class ExceptionHandler private constructor(private val application: Application)
         // writeToFile(reportStringBuffer.toString());
 
         //вызываем активити с диалогом
-        val intent = Intent(application.applicationContext, ExceptionActivity::class.java)
-        intent.putExtra("mError", reportStringBuffer.toString())
-        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        application.applicationContext.startActivity(intent)
+        // The handler runs from an Application context. NEW_TASK is mandatory here;
+        // otherwise Android throws a second exception and hides the original crash.
+        val report = reportStringBuffer.toString()
+        runCatching {
+            application.openFileOutput("last_crash_report.txt", Context.MODE_PRIVATE).use { stream ->
+                stream.write(report.toByteArray(Charsets.UTF_8))
+            }
+        }.onFailure { Log.e(TAG, "Could not persist crash report", it) }
+
+        runCatching {
+            val intent = Intent(application.applicationContext, ExceptionActivity::class.java).apply {
+                putExtra("mError", report)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            application.applicationContext.startActivity(intent)
+        }.onFailure { Log.e(TAG, "Could not open crash report screen", it) }
+
+        // Delegate the original exception to Android's handler for a truthful crash record.
+        previousHandler?.uncaughtException(t, e)
         //  Intent intent = new Intent(application, ErrorReporterActivity.class);
         //  intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         //  application.startActivity(intent);
