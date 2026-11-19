@@ -162,6 +162,14 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
 
     private fun guiCandidates(hint: String): JSONArray {
         val tokens = hint.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length > 2 }
+        val manifestText = runCatching { File(project,"AndroidManifest.xml").readText(Charsets.UTF_8) }.getOrDefault("")
+        val launcherClasses = Regex("<activity\\b[\\s\\S]*?</activity>", RegexOption.IGNORE_CASE)
+            .findAll(manifestText).filter { block ->
+                block.value.contains("android.intent.action.MAIN") && block.value.contains("android.intent.category.LAUNCHER")
+            }.mapNotNull { block ->
+                Regex("android:name=[\\\"']([^\\\"']+)[\\\"']").find(block.value)?.groupValues?.getOrNull(1)
+                    ?.substringAfterLast('.')
+            }.toSet()
         val ranked = allTextFiles().take(6000).mapNotNull { file ->
             val path = file.relativeTo(project).invariantSeparatorsPath
             val lower = path.lowercase()
@@ -180,6 +188,8 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                     { score += 70; reasons.add("WebView interface asset") }
                 lower.contains("mainactivity") || lower.contains("launcheractivity") ->
                     { score += 110; reasons.add("Likely main/launcher Activity") }
+                lower.endsWith(".smali") && launcherClasses.any { lower.endsWith("/" + it.lowercase() + ".smali") || lower.endsWith(it.lowercase() + ".smali") } ->
+                    { score += 140; reasons.add("Smali class declared as the MAIN/LAUNCHER Activity in AndroidManifest.xml") }
                 lower.endsWith(".kt") || lower.endsWith(".java") ->
                     { score += 65; reasons.add("Original source code") }
                 lower.endsWith(".smali") -> { score += 30; reasons.add("Decoded Smali class") }
