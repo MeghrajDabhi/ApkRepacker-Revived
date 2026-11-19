@@ -621,7 +621,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "webview" -> "A WebView UI can load local HTML/CSS/JavaScript from assets or a URL. Inspect WebView.loadUrl/loadData references and trace the actual asset paths."
             else -> "Apktool decodes DEX bytecode into Smali and resources into decoded folders. Original Java/Kotlin source is not guaranteed to be present. Trace manifest component names, Smali class references and resource identifiers."
         }
-        JSONObject().put("topic",key).put("title",page.first).put("url",page.second)
+        return JSONObject().put("topic",key).put("title",page.first).put("url",page.second)
             .put("fetched_from_internet",fetched).put("query",query)
             .put("documentation_excerpt",if (fetched) text else fallback)
             .put("fallback_explanation",fallback)
