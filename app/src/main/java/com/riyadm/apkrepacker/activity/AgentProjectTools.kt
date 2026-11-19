@@ -112,7 +112,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         return file
     }
 
-    private fun isText(file: File) = file.isFile && file.length() <= 512*1024 &&
+    private fun isText(file: File) = file.isFile && file.length() <= 2*1024*1024 &&
         file.extension.lowercase() in textExtensions && !file.name.endsWith(".apk",true) && !file.name.endsWith(".dex",true)
 
     private fun allTextFiles(): Sequence<File> = project.walkTopDown()
@@ -207,10 +207,10 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
 
     private fun readFile(relative: String, start: Int, end: Int): String {
         val file = target(relative)
-        require(isText(file)) { "File is missing, binary, or larger than 512 KB: $relative" }
+        require(isText(file)) { "File is missing, binary, or larger than 2 MB: $relative" }
         val lines = file.readLines(Charsets.UTF_8)
         val from = (start.coerceAtLeast(1)-1).coerceAtMost(lines.size)
-        val until = end.coerceAtLeast(start).coerceAtMost(from+250).coerceAtMost(lines.size)
+        val until = end.coerceAtLeast(start).coerceAtMost(from+300).coerceAtMost(lines.size)
         val body = (from until until).joinToString("\n") { i -> "${i+1}: ${lines[i]}" }
         return JSONObject().put("path",relative).put("total_lines",lines.size)
             .put("start_line",from+1).put("content",body).toString()
@@ -234,7 +234,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
     private fun applyPatch(relative: String, oldText: String, newText: String): String {
         require(oldText.isNotEmpty() && oldText != newText) { "Patch must contain a non-empty old_text and a different new_text." }
         val file = target(relative)
-        require(isText(file)) { "Target must be an existing readable text file under 512 KB." }
+        require(isText(file)) { "Target must be an existing readable text file under 2 MB." }
         val before = file.readText(Charsets.UTF_8)
         val at = before.indexOf(oldText)
         require(at >= 0) { "Patch context was not found in $relative. Read the latest file and retry." }
