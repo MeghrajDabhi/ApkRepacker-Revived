@@ -32,7 +32,15 @@ class MeghrajAiActivity : BaseActivity() {
         val body = LinearLayout(this).apply { orientation = 1 }
         scroll.addView(body)
         page.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        body.addView(TextView(this).apply { text = "Agent"; textSize = 25f })
+        body.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MeghrajAiActivity).apply { text = "Agent"; textSize = 25f }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(Button(this@MeghrajAiActivity).apply {
+                text = "Provider settings"
+                setOnClickListener { startActivity(android.content.Intent(this@MeghrajAiActivity, MeghrajAiSettingsActivity::class.java)) }
+            })
+        })
         body.addView(TextView(this).apply {
             text = "Project: " + project.name + "\nThe project index is read locally. Relevant text files are sent to your selected provider; APK binaries are not uploaded."
             textSize = 13f; setPadding(0, 12, 0, 16)
@@ -64,7 +72,7 @@ class MeghrajAiActivity : BaseActivity() {
             try {
                 status.text = "Indexing every file in the selected project…"
                 val context = withContext(Dispatchers.IO) { readContext(instruction) }
-                status.text = "Sending project index and source context to OpenRouter…"
+                status.text = "Sending project index and source context to ${AiConfig.getProvider(this@MeghrajAiActivity)}…"
                 val answer = withContext(Dispatchers.IO) { requestAi(token, modelId, AiConfig.getProvider(this@MeghrajAiActivity), AiConfig.getBaseUrl(this@MeghrajAiActivity), instruction, context) }
                 val json = JSONObject(answer)
                 val changes = json.optJSONArray("changes") ?: error("AI response did not contain a changes array.")
@@ -141,6 +149,32 @@ class MeghrajAiActivity : BaseActivity() {
         val system = """You are an Android APK project editing agent. Return ONLY JSON:
 {"summary":"brief explanation","changes":[{"path":"existing/relative/path","content":"complete replacement file text"}]}
 Use the complete file index to identify correct existing source files. Only return paths whose full text is included below. For GUI color changes inspect color resources, values, themes, styles, layouts, drawable XML and relevant Smali references. Never invent paths. Preserve unrelated code. Do not alter authentication, licensing, payment checks, anti-tamper or security protections. If you cannot safely determine an edit, return an empty changes array and explain why."""
+        if (provider == "Gemini") {
+            val prompt = system + "\\n\\nTASK:\\n" + instruction + "\\n\\nPROJECT:\\n" + context
+            val payload = JSONObject().put("contents", JSONArray().put(JSONObject()
+                .put("role", "user")
+                .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
+                .put("generationConfig", JSONObject().put("temperature", 0.15))
+            val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") + ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
+            val conn = URL(endpoint).openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"; conn.connectTimeout = 20000; conn.readTimeout = 120000; conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Accept", "application/json")
+            conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+            val code = conn.responseCode
+            val response = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
+            conn.disconnect()
+            if (code !in 200..299) error("Gemini API HTTP $code: " + response.take(700))
+            val root = JSONObject(response)
+            val candidates = root.optJSONArray("candidates") ?: error("Gemini response has no candidates: " + response.take(500))
+            val parts = candidates.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts") ?: error("Gemini response has no text parts.")
+            val raw = (0 until parts.length()).mapNotNull { parts.optJSONObject(it)?.optString("text")?.takeIf { s -> s.isNotBlank() } }.joinToString("\\n")
+            if (raw.isBlank()) error("Gemini returned an empty response.")
+            var normalized = raw.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+            val first = normalized.indexOf('{'); val last = normalized.lastIndexOf('}')
+            if (first >= 0 && last > first) normalized = normalized.substring(first, last + 1)
+            return normalized
+        }
         val messages = JSONArray()
             .put(JSONObject().put("role","system").put("content",system))
             .put(JSONObject().put("role","user").put("content","TASK:\\n" + instruction + "\\n\\nPROJECT:\\n" + context))
