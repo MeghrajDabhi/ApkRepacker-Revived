@@ -35,6 +35,7 @@ class MeghrajAiActivity : BaseActivity() {
     private lateinit var run: MaterialButton
     private lateinit var conversation: LinearLayout
     private lateinit var providerSummary: TextView
+    private lateinit var profileSwitcher: Spinner
     private lateinit var pageScroll: ScrollView
     private var proposed: JSONObject? = null
     private var requestInProgress = false
@@ -142,7 +143,36 @@ class MeghrajAiActivity : BaseActivity() {
             setIconResource(com.riyadm.apkrepacker.R.drawable.ic_meghraj_ai)
             setOnClickListener { showIdeas() }
         }, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(6) })
-        content.addView(actions, marginParams(bottom = 12))
+        content.addView(actions, marginParams(bottom = 8))
+
+        val switchCard = card(color(com.google.android.material.R.attr.colorSurfaceContainerLow, surface))
+        val switchBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        switchBody.addView(TextView(this).apply {
+            text = "QUICK SWITCH · SAVED API PROFILES"
+            textSize = 10f
+            letterSpacing = 0.09f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant, onSurface))
+        })
+        profileSwitcher = Spinner(this)
+        switchBody.addView(profileSwitcher, LinearLayout.LayoutParams(-1, dp(48)))
+        profileSwitcher.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position <= 0) return
+                val profile = AiConfig.getProfiles(this@MeghrajAiActivity).getOrNull(position - 1) ?: return
+                if (AiConfig.getActiveProfileId(this@MeghrajAiActivity) != profile.id) {
+                    AiConfig.activateProfile(this@MeghrajAiActivity, profile.id)
+                    refreshProviderSummary()
+                    status.text = "Switched to " + profile.name + " · " + profile.model
+                }
+            }
+        }
+        switchCard.addView(switchBody)
+        content.addView(switchCard, marginParams(bottom = 12))
 
         val chatCard = card(surface)
         val chatBody = LinearLayout(this).apply {
@@ -216,6 +246,16 @@ class MeghrajAiActivity : BaseActivity() {
         val activeName = AiConfig.getProfiles(this).firstOrNull { it.id == activeId }?.name
         providerSummary.text = (activeName?.let { "$it  ·  " } ?: "") +
             AiConfig.getProvider(this) + "  ·  " + AiConfig.getModel(this)
+        if (::profileSwitcher.isInitialized) {
+            val profiles = AiConfig.getProfiles(this)
+            val labels = mutableListOf("Choose a saved API profile…")
+            labels.addAll(profiles.map { it.name + "  ·  " + it.provider + " / " + it.model })
+            profileSwitcher.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, labels).also {
+                it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            val selected = profiles.indexOfFirst { it.id == activeId }
+            profileSwitcher.setSelection(if (selected >= 0) selected + 1 else 0)
+        }
     }
 
     private fun addMessage(role: String, message: String) {
