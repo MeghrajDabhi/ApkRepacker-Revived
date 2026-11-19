@@ -25,6 +25,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.coroutines.resume
 
 private data class AgentIdea(val category: String, val title: String)
 
@@ -113,7 +114,7 @@ class MeghrajAiActivity : BaseActivity() {
             setPadding(0, dp(7), 0, dp(4))
         })
         heroBody.addView(TextView(this).apply {
-            text = "Describe a change in plain language. Agent inspects relevant project files and asks before applying edits."
+            text = "Describe a change in plain language. Agent explores and edits the selected APK project, then builds it. Risky actions require approval."
             textSize = 13f
             setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant, onSurface))
         })
@@ -301,45 +302,22 @@ class MeghrajAiActivity : BaseActivity() {
         val provider = AiConfig.getProvider(this)
         val baseUrl = AiConfig.getBaseUrl(this)
         val editRequest = isProjectEditRequest(instruction)
-
         addMessage("user", instruction)
         task.setText("")
         requestInProgress = true
         run.isEnabled = false
         run.text = "Working..."
-        status.text = if (editRequest) "Reading a small set of relevant project files..." else "Thinking · no project files are being uploaded..."
+        status.text = if (editRequest) "Starting coding agent · exploring selected APK project..." else "Thinking · no project files are sent for normal chat..."
         lifecycleScope.launch {
             try {
-                val context = if (editRequest) withContext(Dispatchers.IO) { readContext(instruction) } else ""
-                status.text = if (editRequest) "Sending selected source context to " + provider + "..." else "Sending message to " + provider + "..."
-                val answer = withContext(Dispatchers.IO) {
-                    requestAi(token, modelId, provider, baseUrl, instruction, context, editRequest)
-                }
                 if (editRequest) {
-                    val json = JSONObject(extractJson(answer))
-                    val changes = json.optJSONArray("changes") ?: error("The model did not return a valid edit plan. Try again with a more specific task.")
-                    if (changes.length() == 0) {
-                        val summary = json.optString("summary", "No file changes were proposed.")
-                        addMessage("agent", summary)
-                        status.text = "No edits proposed."
-                    } else {
-                        proposed = json
-                        val preview = StringBuilder(json.optString("summary", "Proposed changes"))
-                        for (i in 0 until changes.length()) {
-                            preview.append("\n\n• ").append(changes.getJSONObject(i).optString("path"))
-                        }
-                        MaterialAlertDialogBuilder(this@MeghrajAiActivity)
-                            .setTitle("Review proposed changes")
-                            .setMessage(preview.toString())
-                            .setNegativeButton("Reject") { _, _ ->
-                                proposed = null
-                                addMessage("agent", "Changes rejected. Your project files were not changed.")
-                            }
-                            .setPositiveButton("Apply edits") { _, _ -> applyChanges() }
-                            .show()
-                        status.text = "Review " + changes.length() + " proposed file change(s). Nothing has changed yet."
-                    }
+                    val answer = runCodingAgent(token, modelId, provider, baseUrl, instruction)
+                    addMessage("agent", answer)
+                    status.text = "Task finished · review the activity log and rebuild result."
                 } else {
+                    val answer = withContext(Dispatchers.IO) {
+                        requestAi(token, modelId, provider, baseUrl, instruction, "", false)
+                    }
                     addMessage("agent", answer.ifBlank { "The provider returned an empty answer." })
                     status.text = "Reply received from " + provider + "."
                 }
@@ -355,6 +333,159 @@ class MeghrajAiActivity : BaseActivity() {
         }
     }
 
+    /**
+     * Tool-calling loop: model -> local project tool -> tool result -> model.
+     * The model never receives the whole project. It discovers and reads files on demand.
+     */
+    private suspend fun runCodingAgent(
+        token: String, modelId: String, provider: String, baseUrl: String, instruction: String
+    ): String {
+        val compatibleProviders = setOf(
+            "OpenAI", "OpenRouter", "DeepSeek", "NVIDIA NIM", "Groq", "Mistral",
+            "Together AI", "Fireworks AI", "Cerebras", "AgentRouter", "Custom"
+        )
+        require(provider in compatibleProviders) {
+            "$provider is configured as a non-OpenAI-compatible API in this build. Select an OpenAI-compatible saved profile for tool execution."
+        }
+        val runtime = AgentProjectTools(this, project)
+        val messages = JSONArray()
+        messages.put(JSONObject().put("role", "system").put("content",
+            """You are a coding agent operating on the user's selected, decoded Android APK project.
+You have local tools that inspect and edit the actual files. Do not return code for the user to copy.
+For every requested project change: explore the file tree, search for relevant identifiers/resources, read the exact files, then make focused edits using apply_file_patch. Use multiple tool calls for multiple files. Do not guess paths or overwrite files blindly.
+After edits, inspect relevant changed files and call build_project to compile the APK. If the build fails, analyze the actual errors, make a focused fix, and retry (maximum 2 build attempts). Never claim a build succeeded unless the build tool confirms it.
+This is HYBRID mode: safe source/resource edits may be applied automatically. The app asks the user before manifest edits or file deletion. Do not add permissions, change package identity, weaken app security, or alter signing settings unless the user explicitly requested it. Never read or expose API keys, private signing keys, credentials, or unrelated personal files.
+Only work inside the selected project. Use rollback_last_changes if you need to undo your own changes. Keep tool calls focused and final report concise. The APK is rebuilt unsigned; do not claim it is installed or signed."""
+        ))
+        messages.put(JSONObject().put("role","user").put("content",
+            "Selected project: " + project.name + "\nTask: " + instruction +
+            "\nBegin by exploring the project and then execute the requested change."))
+        val toolDefinitions = runtime.definitions()
+        var completedToolCalls = 0
+        var buildAttempts = 0
+        while (completedToolCalls < 24) {
+            status.text = "Agent thinking · step " + (completedToolCalls + 1) + " · " + provider
+            val assistant = withContext(Dispatchers.IO) {
+                requestToolTurn(token, modelId, provider, baseUrl, messages, toolDefinitions)
+            }
+            messages.put(assistant)
+            val calls = assistant.optJSONArray("tool_calls")
+            if (calls == null || calls.length() == 0) {
+                val answer = assistant.optString("content","").trim()
+                return answer.ifBlank { "The model ended the task without a final summary." }
+            }
+            for (i in 0 until calls.length()) {
+                val call = calls.getJSONObject(i)
+                val callId = call.optString("id")
+                val fn = call.optJSONObject("function") ?: error("The model returned an invalid tool call.")
+                val name = fn.optString("name")
+                val args = runCatching { JSONObject(fn.optString("arguments","{}")) }
+                    .getOrElse { error("Invalid arguments for $name: ${it.message}") }
+                val summary = when(name) {
+                    "list_project_files" -> "Exploring project files"
+                    "search_project_files" -> "Searching source and resources"
+                    "read_project_file" -> "Reading " + args.optString("path")
+                    "apply_file_patch" -> "Editing " + args.optString("path")
+                    "create_project_file" -> "Creating " + args.optString("path")
+                    "delete_project_file" -> "Deleting " + args.optString("path")
+                    "build_project" -> "Building decoded APK"
+                    "rollback_last_changes" -> "Rolling back Agent edits"
+                    else -> "Running " + name
+                }
+                status.text = summary + "..."
+                val approvalText = runtime.requiresApproval(name,args)
+                val approved = if (approvalText != null) confirmAgentAction(approvalText) else true
+                val result = if (!approved) {
+                    JSONObject().put("approved",false).put("message","User declined this action. Do not retry the same action; continue safely or explain the limitation.").toString()
+                } else {
+                    if (name == "build_project") buildAttempts++
+                    withContext(Dispatchers.IO) { runtime.execute(name,args) }
+                }
+                completedToolCalls++
+                if (name == "apply_file_patch" && approved) {
+                    val oldText = args.optString("old_text").take(500)
+                    val newText = args.optString("new_text").take(500)
+                    addMessage("agent", "FILE DIFF · " + args.optString("path") +
+                        "\n- " + oldText.replace("\n","\n- ") +
+                        "\n+ " + newText.replace("\n","\n+ "))
+                } else if (name == "build_project") {
+                    val buildResult = runCatching { JSONObject(result) }.getOrNull()
+                    if (buildResult?.optBoolean("success") == true) {
+                        addMessage("agent", "BUILD PASSED · unsigned APK created (" +
+                            buildResult.optLong("apk_bytes") + " bytes).")
+                    } else if (buildResult != null) {
+                        addMessage("agent", "BUILD FAILED · " + buildResult.optString("error").take(700))
+                    }
+                } else if (name == "rollback_last_changes" && approved) {
+                    addMessage("agent", "ROLLBACK · " + result)
+                } else if (name == "delete_project_file" && approved) {
+                    addMessage("agent", "FILE DELETED · " + args.optString("path") + " (backup retained).")
+                }
+                messages.put(JSONObject().put("role","tool").put("tool_call_id",callId).put("content",result))
+                if (completedToolCalls >= 24) break
+            }
+            if (buildAttempts >= 3) {
+                messages.put(JSONObject().put("role","system").put("content",
+                    "Build retry limit reached. Stop building and report the remaining errors accurately."))
+            }
+        }
+        return "The Agent reached its 24-tool safety limit. Review the activity log; any applied changes have session backups and can be rolled back."
+    }
+
+    private suspend fun confirmAgentAction(message: String): Boolean =
+        kotlin.coroutines.suspendCoroutine { continuation ->
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Agent approval required")
+                .setMessage(message)
+                .setNegativeButton("Cancel") { _, _ -> continuation.resume(false) }
+                .setPositiveButton("Approve") { _, _ -> continuation.resume(true) }
+                .setOnCancelListener { continuation.resume(false) }
+                .show()
+        }
+
+    private fun requestToolTurn(
+        token: String,
+        modelId: String,
+        provider: String,
+        baseUrl: String,
+        messages: JSONArray,
+        tools: JSONArray
+    ): JSONObject {
+        val payload = JSONObject().put("model",modelId).put("messages",messages)
+            .put("tools",tools).put("tool_choice","auto")
+            .put("temperature",0.1).put("max_tokens",4096)
+        val endpoint = baseUrl.trim().trimEnd('/') + "/chat/completions"
+        val conn = URL(endpoint).openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 20000
+        conn.readTimeout = 120000
+        conn.doOutput = true
+        conn.setRequestProperty("Authorization","Bearer " + token)
+        conn.setRequestProperty("Content-Type","application/json")
+        conn.setRequestProperty("Accept","application/json")
+        if (provider == "OpenRouter") {
+            conn.setRequestProperty("HTTP-Referer","https://github.com/MeghrajDabhi/ApkRepacker-Revived")
+            conn.setRequestProperty("X-Title","Agent APK Editor")
+        }
+        conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+        val code = conn.responseCode
+        val response = (if(code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.use { it.readText() }.orEmpty()
+        conn.disconnect()
+        if(code !in 200..299) throw IllegalStateException(explainApiError(provider,code,response))
+        val root = JSONObject(response)
+        val choices = root.optJSONArray("choices") ?: error(provider + " returned no choices.")
+        val choice = choices.optJSONObject(0) ?: error(provider + " returned an empty choices list.")
+        val message = choice.optJSONObject("message") ?: error(provider + " returned no assistant message.")
+        val calls = message.optJSONArray("tool_calls")
+        if (calls != null && calls.length() > 0) return message
+        val content = message.opt("content")
+        if (content is String && content.isNotBlank()) return message
+        val finish = choice.optString("finish_reason")
+        if (finish == "length") error("The model hit its output-token limit during tool execution. Select a model with a larger output allowance.")
+        error(provider + " returned neither a final answer nor tool calls. The selected model may not support function calling.")
+    }
+    
     private fun isProjectEditRequest(instruction: String): Boolean {
         val editWords = listOf(
             "add", "create", "implement", "build", "change", "modify", "edit", "remove",
