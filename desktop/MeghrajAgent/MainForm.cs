@@ -20,7 +20,7 @@ public sealed class MainForm : Form
     {
         Text = "Meghraj AI Desktop Agent";
         Width = 980; Height = 760; MinimumSize = new Size(760, 600);
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 2, RowCount = 8 };
+        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(12), ColumnCount = 2, RowCount = 0 };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         Controls.Add(layout);
