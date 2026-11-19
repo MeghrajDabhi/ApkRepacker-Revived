@@ -446,7 +446,7 @@ Only return files whose full text is included in the supplied source context. Ne
                     .put("role", "user")
                     .put("parts", JSONArray().put(JSONObject().put("text", prompt)))))
                 .put("generationConfig", JSONObject().put("temperature", 0.15)
-                    .put("maxOutputTokens", if (editRequest) 4096 else 1024))
+                    .put("maxOutputTokens", if (editRequest) 4096 else 256))
             val endpoint = baseUrl.trim().trimEnd('/') + "/v1beta/models/" + modelId.removePrefix("models/") +
                 ":generateContent?key=" + java.net.URLEncoder.encode(token, "UTF-8")
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -475,7 +475,7 @@ Only return files whose full text is included in the supplied source context. Ne
         if (provider == "Anthropic") {
             val messages = JSONArray().put(JSONObject().put("role", "user").put("content", userPrompt))
             val payload = JSONObject().put("model", modelId)
-                .put("max_tokens", if (editRequest) 4096 else 1024)
+                .put("max_tokens", if (editRequest) 4096 else 256)
                 .put("system", system).put("messages", messages)
             val endpoint = baseUrl.trim().trimEnd('/') + "/messages"
             val conn = URL(endpoint).openConnection() as HttpURLConnection
@@ -562,6 +562,10 @@ Only return files whose full text is included in the supplied source context. Ne
                 lower.contains("context window") || lower.contains("prompt is too long") ||
                 lower.contains("too many tokens") || lower.contains("input token count exceeds") ->
                 "This model's context window is too small for the current request. Agent now sends a limited set of project files. Try again, or select a larger-context model."
+            lower.contains("this request requires more credits") ||
+                lower.contains("openrouter_key_limit") || lower.contains("workspace budget") ||
+                lower.contains("limit_source") ->
+                "The API key was recognized, but its spend limit or available credits cannot cover this request. Check OpenRouter credits and the key/workspace usage limit. For a normal chat message, Agent now requests only 256 output tokens."
             lower.contains("token_limit_exceeded") ->
                 "The provider rejected this request because its token budget or account limit was reached. This is different from an invalid API key; check provider usage, credits and limits."
             lower.contains("string_too_long") ->
