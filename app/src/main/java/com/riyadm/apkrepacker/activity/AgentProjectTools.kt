@@ -1,6 +1,8 @@
 package com.riyadm.apkrepacker.activity
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import java.io.FileInputStream
 import com.riyadm.apkrepacker.apktool.ApktoolEngine
 import com.riyadm.apkrepacker.apktool.ApktoolLogListener
 import com.riyadm.apkrepacker.apktool.BuildOptions
@@ -20,8 +22,16 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         .take(12).joinToString("") { "%02x".format(it) }
     private val backupRoot = File(appContext.filesDir, "agent-backups/$projectKey/$sessionId")
     private val backedUp = linkedSetOf<String>()
-    private val ignoredDirs = setOf(".git", ".gradle", "build", "tmp", "temp", "node_modules", ".idea")
-    private val textExtensions = setOf("xml","smali","json","txt","properties","yml","yaml","html","htm","css","js","java","kt","gradle","pro","cfg","ini","md")
+    // The selected project is the access boundary. Do not silently hide .git, hidden resource
+    // folders, generated directories, or unfamiliar extensions from the agent's inventory.
+    private val ignoredDirs = emptySet<String>()
+    private val textExtensions = setOf(
+        "xml","smali","json","txt","properties","yml","yaml","html","htm","css","js","java","kt",
+        "gradle","pro","cfg","ini","md","kts","groovy","toml","sh","bat","cmd","ps1","py","rb",
+        "php","ts","tsx","jsx","c","h","cpp","hpp","rs","go","swift","sql","csv","tsv","log",
+        "conf","config","xmls","aidl","proto","svg","plist","entitlements","gitignore","gitattributes",
+        "editorconfig","makefile","dockerfile","lock","properties"
+    )
 
     init { require(project.isDirectory && project.canRead()) { "Selected APK project is not readable." } }
 
@@ -37,10 +47,12 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                 .put("limit",JSONObject().put("type","integer").put("description","Page size from 20 to 120; defaults to 80.")),JSONArray())))
         tools.put(function("search_project_files","Search text content across decoded APK files. Returns bounded matching paths and line excerpts.",
             schema("query","Text, resource name, class, method, or identifier to search for.")))
-        tools.put(function("read_project_file","Read a specific project text file with line numbers in chunks of at most 120 lines. The result includes has_more and next_start_line.",
+        tools.put(function("read_project_file","Read a supported text file with line numbers in small chunks. The result includes has_more and next_start_line.",
             objSchema(JSONObject().put("path",str("Project-relative file path."))
                 .put("start_line",JSONObject().put("type","integer").put("description","1-based start line, defaults to 1."))
-                .put("end_line",JSONObject().put("type","integer").put("description","1-based end line, defaults to 250.")), JSONArray().put("path"))))
+                .put("end_line",JSONObject().put("type","integer").put("description","1-based end line, defaults to 80.")), JSONArray().put("path"))))
+        tools.put(function("inspect_project_file","Inspect ANY file type, including binary APK resources, images, fonts, DEX, ARSC, archives and unknown extensions. Returns exact path, size, MIME guess, SHA-256 and a safe hex header; it does not pretend binary bytes are text.",
+            objSchema(JSONObject().put("path",str("Exact project-relative file path from the inventory.")),JSONArray().put("path"))))
         tools.put(function("apply_file_patch","Replace one exact unique text range in an existing file. Read it first. Repeat this tool for multi-file edits.",
             objSchema(JSONObject().put("path",str("Project-relative existing text file path."))
                 .put("old_text",str("Exact existing text to replace; it must occur exactly once."))
@@ -100,7 +112,8 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             "find_gui_files" -> findGuiFiles(args.optString("task_hint",""))
             "list_project_files" -> listFiles(args.optString("path",""),args.optInt("offset",0),args.optInt("limit",80))
             "search_project_files" -> searchFiles(args.optString("query",""))
-            "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",250))
+            "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",80))
+            "inspect_project_file" -> inspectProjectFile(args.optString("path",""))
             "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
         "apply_multi_file_patches" -> applyMultiFilePatches(args.optJSONArray("patches") ?: JSONArray())
             "create_project_file" -> createFile(args.optString("path",""),args.optString("content",""))
@@ -129,12 +142,58 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         return file
     }
 
-    private fun isText(file: File) = file.isFile && file.length() <= 2*1024*1024 &&
-        file.extension.lowercase() in textExtensions && !file.name.endsWith(".apk",true) && !file.name.endsWith(".dex",true)
+    private fun isText(file: File): Boolean {
+        if (!file.isFile || file.length() > 8L*1024*1024) return false
+        if (file.extension.lowercase() in textExtensions || file.name in setOf("Makefile","Dockerfile","Gemfile","Rakefile","LICENSE","NOTICE")) {
+            val sample = ByteArray(4096)
+            val count = runCatching { FileInputStream(file).use { it.read(sample) } }.getOrDefault(-1)
+            return count >= 0 && (0 until count).none { sample[it] == 0.toByte() }
+        }
+        return false
+    }
 
-    private fun allTextFiles(): Sequence<File> = project.walkTopDown()
-        .onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
-        .filter { isText(it) }
+    private fun allFiles(): Sequence<File> = project.walkTopDown()
+        .onEnter { d -> d == project || !java.nio.file.Files.isSymbolicLink(d.toPath()) }
+        .filter { it.isFile }
+
+    private fun allTextFiles(): Sequence<File> = allFiles().filter { isText(it) }
+
+    private fun inspectProjectFile(relative: String): String {
+        val file = target(relative)
+        require(file.isFile && file.canRead()) { "File is missing or unreadable: $relative" }
+        val digest = MessageDigest.getInstance("SHA-256")
+        val header = ByteArray(64)
+        var headerSize = 0
+        FileInputStream(file).use { input ->
+            val read = input.read(header)
+            headerSize = if (read < 0) 0 else read
+            digest.update(header,0,headerSize)
+            val buffer = ByteArray(64*1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer,0,count)
+            }
+        }
+        val hex = (0 until headerSize).joinToString(" ") { "%02X".format(header[it]) }
+        val printable = (0 until headerSize).map { b ->
+            val v = header[b].toInt() and 0xff
+            if (v in 32..126) v.toChar() else '.'
+        }.joinToString("")
+        val imageBounds = if (file.extension.lowercase() in setOf("png","jpg","jpeg","webp","gif","bmp")) {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            runCatching { BitmapFactory.decodeFile(file.absolutePath,options) }
+            JSONObject().put("width",options.outWidth).put("height",options.outHeight)
+                .put("mime_type",options.outMimeType ?: JSONObject.NULL)
+        } else JSONObject.NULL
+        return JSONObject().put("ok",true).put("path",relative)
+            .put("name",file.name).put("extension",file.extension.lowercase())
+            .put("bytes",file.length()).put("readable",file.canRead())
+            .put("text_candidate",isText(file)).put("sha256",digest.digest().joinToString("") { "%02x".format(it) })
+            .put("header_hex",hex).put("header_ascii",printable).put("image",imageBounds)
+            .put("note","Binary files are inventoried and fingerprinted without corrupting their bytes. Use a type-specific viewer or editor for binary modifications.")
+            .toString()
+    }
 
     private fun inspectProject(): String {
         val directories = JSONArray()
@@ -151,16 +210,14 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             }
         }
         val directoryPaths = JSONArray()
-        project.walkTopDown().onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
+        project.walkTopDown().onEnter { d -> d == project || !java.nio.file.Files.isSymbolicLink(d.toPath()) }
             .filter { it.isDirectory && it != project }.take(150).forEach {
                 directoryPaths.put(it.relativeTo(project).invariantSeparatorsPath)
             }
         val important = listOf("AndroidManifest.xml","apktool.yml","res/values/strings.xml",
             "res/values/styles.xml","res/values/themes.xml").filter { File(project,it).isFile }
         val count = allTextFiles().take(10001).count()
-        val allEntries = project.walkTopDown()
-            .onEnter { d -> d == project || (!d.name.startsWith(".") && d.name !in ignoredDirs) }
-            .take(50001).filter { it.isFile }.count()
+        val allEntries = allFiles().take(50001).count()
         val textSample = JSONArray()
         allTextFiles().take(80).forEach { textSample.put(it.relativeTo(project).invariantSeparatorsPath) }
         return JSONObject().put("ok",true).put("project_name",project.name)
@@ -170,12 +227,14 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .put("directory_paths",directoryPaths).put("important_files",JSONArray(important))
             .put("readable_text_files",count).put("count_capped",count > 10000)
             .put("total_project_files",allEntries).put("total_files_capped",allEntries > 50000)
+            .put("hidden_files_included",true).put("generated_and_git_directories_included",true)
+            .put("symlinks_followed",false)
             .put("has_android_manifest",File(project,"AndroidManifest.xml").isFile)
             .put("has_apktool_metadata",File(project,"apktool.yml").isFile)
             .put("has_resource_directory",File(project,"res").isDirectory)
             .put("has_smali_directory",project.listFiles()?.any { it.isDirectory && it.name.startsWith("smali") } == true)
             .put("text_file_sample",textSample).put("gui_candidates",guiCandidates(""))
-            .put("note","Full local inventory includes folders and binary assets. Text contents are read only on demand in chunks. Decoded APKs commonly use res/layout XML, res/values resources and smali classes; original Kotlin/Java source may not exist.")
+            .put("note","Inventory includes hidden folders, .git, generated folders, every readable regular file type and binary assets. Symbolic links are not followed to prevent escaping the selected project. Use inspect_project_file for binary metadata and read_project_file for supported text files. File contents are only sent on demand in small chunks.")
             .toString()
     }
 
@@ -237,7 +296,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val offset = requestedOffset.coerceAtLeast(0)
         val limit = requestedLimit.coerceIn(20,80)
         val children = folder.listFiles()?.filter { child ->
-            if (child.isDirectory) !child.name.startsWith(".") && child.name !in ignoredDirs else true
+            !java.nio.file.Files.isSymbolicLink(child.toPath())
         }?.sortedWith(compareBy<File>({ if (it.isDirectory) 0 else 1 }, { it.name.lowercase() })).orEmpty()
         val page = children.drop(offset).take(limit)
         val dirs = JSONArray()
@@ -251,7 +310,9 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                 entries.put(item)
             } else {
                 val item = JSONObject().put("type","file").put("name",child.name).put("path",path)
-                    .put("bytes",child.length()).put("text_candidate",isText(child))
+                    .put("bytes",child.length()).put("extension",child.extension.lowercase())
+                    .put("readable",child.canRead()).put("text_candidate",isText(child))
+                    .put("kind",if (isText(child)) "text" else "binary_or_unknown")
                 files.put(item)
                 entries.put(item)
             }
