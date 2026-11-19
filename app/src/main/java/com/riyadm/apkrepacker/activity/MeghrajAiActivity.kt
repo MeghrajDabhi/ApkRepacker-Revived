@@ -436,7 +436,10 @@ Only work inside the selected project. Use rollback_last_changes if you need to 
                     val paths = runCatching { JSONObject(result).optJSONArray("paths") }.getOrNull()
                     val names = paths?.let { arr -> (0 until arr.length()).map { arr.optString(it) } }.orEmpty()
                     addMessage("agent", "MULTI-FILE PATCH APPLIED · " + names.size + " file(s)\n" + names.joinToString("\n"))
-                } else if (runCatching { JSONObject(result).optBoolean("ok") }.getOrDefault(true).not()) {
+                } else if (runCatching {
+                    val parsed = JSONObject(result)
+                    parsed.has("ok") && !parsed.optBoolean("ok")
+                }.getOrDefault(false)) {
                     val recovery = runCatching { JSONObject(result).optString("recovery") }.getOrDefault("")
                     addMessage("agent", "TOOL RECOVERY · " + runCatching { JSONObject(result).optString("error") }.getOrDefault("Tool error") +
                         if (recovery.isNotBlank()) "\n" + recovery else "")
