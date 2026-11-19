@@ -27,7 +27,7 @@ class MeghrajAiSettingsActivity : BaseActivity() {
         val content = LinearLayout(this).apply { orientation = 1 }
         scroll.addView(content)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        content.addView(TextView(this).apply { text = "Meghraj AI Settings"; textSize = 24f })
+        content.addView(TextView(this).apply { text = "Agent settings"; textSize = 24f })
         content.addView(TextView(this).apply {
             text = "Choose an OpenAI-compatible API provider. API keys are encrypted with Android Keystore. Provider API terms and model availability still apply."
             setPadding(0, 12, 0, 16)
