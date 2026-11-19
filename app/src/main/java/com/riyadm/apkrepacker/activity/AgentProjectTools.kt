@@ -74,16 +74,28 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         }
     }
 
-    fun execute(name: String, args: JSONObject): String = when(name) {
-        "list_project_files" -> listFiles(args.optString("path",""))
-        "search_project_files" -> searchFiles(args.optString("query",""))
-        "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",250))
-        "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
-        "create_project_file" -> createFile(args.optString("path",""),args.optString("content",""))
-        "delete_project_file" -> deleteFile(args.optString("path",""))
-        "build_project" -> buildProject(args.optBoolean("force",false))
-        "rollback_last_changes" -> rollback()
-        else -> error("Unknown Agent tool: $name")
+    fun execute(name: String, args: JSONObject): String = try {
+        when(name) {
+            "inspect_project" -> inspectProject()
+            "find_gui_files" -> findGuiFiles(args.optString("task_hint",""))
+            "list_project_files" -> listFiles(args.optString("path",""))
+            "search_project_files" -> searchFiles(args.optString("query",""))
+            "read_project_file" -> readFile(args.optString("path",""),args.optInt("start_line",1),args.optInt("end_line",250))
+            "apply_file_patch" -> applyPatch(args.optString("path",""),args.optString("old_text",""),args.optString("new_text",""))
+            "create_project_file" -> createFile(args.optString("path",""),args.optString("content",""))
+            "delete_project_file" -> deleteFile(args.optString("path",""))
+            "build_project" -> buildProject(args.optBoolean("force",false))
+            "rollback_last_changes" -> rollback()
+            else -> error("Unknown Agent tool: $name")
+        }
+    } catch (e: Exception) {
+        val requested = args.optString("path","")
+        val rootDirs = project.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted().orEmpty()
+        JSONObject().put("ok",false).put("error",e.message ?: e.javaClass.simpleName)
+            .put("requested_path",requested).put("actual_project_root",project.absolutePath)
+            .put("actual_root_directories",JSONArray(rootDirs))
+            .put("recovery","Do not stop. Call inspect_project or list_project_files with empty path, then retry using exact returned paths.")
+            .toString()
     }
 
     private fun target(relative: String): File {
