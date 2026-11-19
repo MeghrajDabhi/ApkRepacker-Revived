@@ -102,7 +102,7 @@ class MeghrajAiActivity : BaseActivity() {
             textSize = 11f
             letterSpacing = 0.12f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(color(com.google.android.material.R.attr.colorPrimary, onSurface))
+            setTextColor(color(com.google.android.material.R.attr.colorPrimaryContainer, onSurface))
         })
         heroBody.addView(TextView(this).apply {
             text = project.name
@@ -119,7 +119,7 @@ class MeghrajAiActivity : BaseActivity() {
         providerSummary = TextView(this).apply {
             textSize = 12f
             setPadding(0, dp(12), 0, 0)
-            setTextColor(color(com.google.android.material.R.attr.colorPrimary, onSurface))
+            setTextColor(color(com.google.android.material.R.attr.colorPrimaryContainer, onSurface))
         }
         heroBody.addView(providerSummary)
         hero.addView(heroBody)
@@ -173,7 +173,7 @@ class MeghrajAiActivity : BaseActivity() {
             textSize = 11f
             letterSpacing = 0.1f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(color(com.google.android.material.R.attr.colorPrimary, onSurface))
+            setTextColor(color(com.google.android.material.R.attr.colorPrimaryContainer, onSurface))
         })
         val taskLayout = TextInputLayout(this).apply {
             hint = "Describe your task..."
@@ -538,7 +538,7 @@ Only return files whose full text is included in the supplied source context. Ne
         }
         val search = EditText(this).apply {
             hint = "Search 100 ideas..."
-            singleLine = true
+            maxLines = 1
         }
         val list = ListView(this)
         wrap.addView(search, LinearLayout.LayoutParams(-1, dp(52)))
