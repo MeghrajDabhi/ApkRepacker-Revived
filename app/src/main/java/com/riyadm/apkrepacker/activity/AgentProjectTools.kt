@@ -381,7 +381,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
                 importantCodePaths.add(relative)
                 val source = runCatching { file.readText(Charsets.UTF_8) }.getOrDefault("")
                 val refs = linkedSetOf<String>()
-                Regex("R\\.layout\\.([A-Za-z0-9_]+)|R\\$layout;->([A-Za-z0-9_]+):I")
+                Regex("R\\.layout\\.([A-Za-z0-9_]+)|R\\\$layout;->([A-Za-z0-9_]+):I")
                     .findAll(source).mapNotNull { it.groupValues.drop(1).firstOrNull { v -> v.isNotBlank() } }
                     .forEach { refs.add(it) }
                 if (file.extension.equals("smali",true) && publicResourceIds.isNotEmpty()) {
@@ -430,7 +430,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
             .put("resolved_activity_code",resolved).put("related_layout_files",layoutMatches)
             .put("important_activity_paths",JSONArray(importantCodePaths))
             .put("theme_resource_paths",JSONArray(themeFiles.toList()))
-            .put("note","Activity names came from the decoded manifest. Code paths and layout XML are included only when the exact name/reference could be resolved. For Smali layouts hidden behind numeric IDs, use search_project_files for setContentView, R$layout or resource IDs and inspect res/values/public.xml.")
+            .put("note","Activity names came from the decoded manifest. Code paths and layout XML are included only when the exact name/reference could be resolved. For Smali layouts hidden behind numeric IDs, use search_project_files for setContentView, R\$layout or resource IDs and inspect res/values/public.xml.")
     }
 
     private fun guiCandidates(hint: String): JSONArray {
@@ -595,7 +595,7 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val fallback = when(key) {
             "activity" -> "An Activity is an app component that provides a window for a user interface. Find the declared activity in AndroidManifest.xml, resolve its class to a Java/Kotlin or decoded Smali path, then trace setContentView, layout inflation or Compose setContent."
             "fragment" -> "A Fragment owns a portion of a UI. Trace the host Activity and FragmentTransaction/NavHost, then inspect the Fragment's onCreateView/layout inflater or ComposeView. Do not assume a corresponding layout XML exists."
-            "layout" -> "Classic View layouts are XML files under res/layout and qualified variants such as res/layout-land. Their basename is the layout resource name. Trace setContentView(R.layout.name), inflate(R.layout.name) or Smali R$layout references from the actual Activity/Fragment."
+            "layout" -> "Classic View layouts are XML files under res/layout and qualified variants such as res/layout-land. Their basename is the layout resource name. Trace setContentView(R.layout.name), inflate(R.layout.name) or Smali R\$layout references from the actual Activity/Fragment."
             "resources" -> "Android resources live under typed res subdirectories: layout, drawable, mipmap, values, menu, xml, raw and font. Values XML can contain strings, colors, dimensions, styles and themes. Assets are separate from res and keep their original directory paths."
             "manifest" -> "AndroidManifest.xml declares app components, intent filters, themes and metadata. Resolve fully qualified component names and then find their corresponding code or Smali files."
             "compose" -> "Jetpack Compose UI is generally declared in Kotlin source through @Composable functions and setContent; decoded APKs may expose only DEX/Smali, not original Kotlin source."
