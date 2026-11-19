@@ -363,8 +363,30 @@ This is HYBRID mode: safe source/resource edits may be applied automatically. Th
 Only work inside the selected project. Use rollback_last_changes if you need to undo your own changes. Keep tool calls focused and final report concise. The APK is rebuilt unsigned; do not claim it is installed or signed."""
         ))
         messages.put(JSONObject().put("role","user").put("content",
-            "Selected project: " + project.name + "\nTask: " + instruction +
-            "\nBegin by exploring the project and then execute the requested change."))
+            "Selected project: " + project.name + "\nVerified project root: " + project.absolutePath +
+            "\nTask: " + instruction +
+            "\nBegin by using the verified inventory below. Never ask the user to copy code. Execute changes in this selected project."))
+        // Do not rely on the model to discover whether a project exists. The app verifies
+        // the selected root and sends a bounded inventory before the first model request.
+        val preflight = withContext(Dispatchers.IO) {
+            JSONObject().put("inspection", runtime.execute("inspect_project", JSONObject()))
+                .put("root_listing", runtime.execute("list_project_files", JSONObject().put("path","")))
+        }
+        val inspection = JSONObject(preflight.optString("inspection", "{}"))
+        val rootListing = JSONObject(preflight.optString("root_listing", "{}"))
+        require(inspection.optBoolean("ok", false) && inspection.optBoolean("is_directory", false)) {
+            "Selected project could not be indexed. Root: " + project.absolutePath +
+                " · " + inspection.optString("error", "The folder is not readable.")
+        }
+        messages.put(JSONObject().put("role","assistant").put("content",
+            "AUTOMATIC LOCAL PROJECT PREFLIGHT (verified by the app, not guessed by the model):\n" +
+                preflight.toString() +
+                "\nUse exact paths from this inventory. The directory listing includes folders and binary assets; file reads are limited to 120 lines per request."))
+        addMessage("agent", "PROJECT CONNECTED · " + project.name +
+            "\nRoot: " + project.absolutePath +
+            "\nText files indexed: " + inspection.optInt("readable_text_files") +
+            "\nTop-level folders: " + (rootListing.optJSONArray("directories")?.length() ?: 0) +
+            "\nThe Agent has verified the selected project and can now inspect files.")
         val toolDefinitions = runtime.definitions()
         var completedToolCalls = 0
         var buildAttempts = 0
