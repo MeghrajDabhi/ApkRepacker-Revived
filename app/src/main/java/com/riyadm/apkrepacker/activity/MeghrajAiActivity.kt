@@ -25,8 +25,24 @@ class MeghrajAiActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        project = File(intent.getStringExtra(EXTRA_PROJECT_PATH).orEmpty()).canonicalFile
-        if (!project.isDirectory) { finish(); return }
+        val rawProjectPath = intent.getStringExtra(EXTRA_PROJECT_PATH)?.trim().orEmpty()
+        if (rawProjectPath.isBlank()) {
+            Toast.makeText(this, "No decoded project was supplied. Reopen Agent from an APK project.", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
+        project = try {
+            File(rawProjectPath).canonicalFile
+        } catch (e: Exception) {
+            Toast.makeText(this, "Cannot open project: ${e.message ?: "invalid path"}", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
+        if (!project.exists() || !project.isDirectory || !project.canRead()) {
+            Toast.makeText(this, "The decoded project is missing or cannot be read.", Toast.LENGTH_LONG).show()
+            finish()
+            return
+        }
         val page = LinearLayout(this).apply { orientation = 1; setPadding(20, 20, 20, 20) }
         val scroll = ScrollView(this)
         val body = LinearLayout(this).apply { orientation = 1 }
