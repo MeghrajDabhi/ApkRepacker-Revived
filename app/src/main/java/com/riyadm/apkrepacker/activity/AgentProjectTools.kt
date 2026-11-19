@@ -290,9 +290,89 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
 
     private fun findGuiFiles(hint: String): String =
         JSONObject().put("ok",true).put("task_hint",hint).put("project_root",project.absolutePath)
+            .put("android_ui_map",buildAndroidUiMap(hint))
             .put("candidates",guiCandidates(hint))
-            .put("instruction","Read exact candidate files before editing. Use returned paths; do not invent MainActivity.kt.")
+            .put("instruction","The android_ui_map traces manifest-declared Activities to exact source/Smali files and their referenced layout XML where detectable. Read only task-relevant paths. Do not guess MainActivity or any directory.")
             .toString()
+
+    private fun buildAndroidUiMap(hint: String): JSONObject {
+        val manifestFile = File(project,"AndroidManifest.xml")
+        val manifestText = runCatching { if (manifestFile.isFile && manifestFile.length() <= 2*1024*1024) manifestFile.readText(Charsets.UTF_8) else "" }.getOrDefault("")
+        val packageName = Regex("<manifest[^>]*\\bpackage=[\\\"']([^\\\"']+)",RegexOption.IGNORE_CASE)
+            .find(manifestText)?.groupValues?.getOrNull(1).orEmpty()
+        val activityBlocks = Regex("<activity(?:-alias)?\\b[\\s\\S]*?</activity(?:-alias)?>",RegexOption.IGNORE_CASE)
+            .findAll(manifestText).map { it.value }.toList()
+        val declarations = JSONArray()
+        val launcherClassNames = linkedSetOf<String>()
+        val activityNames = linkedSetOf<String>()
+        for (block in activityBlocks) {
+            val rawName = Regex("android:name=[\\\"']([^\\\"']+)[\\\"']",RegexOption.IGNORE_CASE)
+                .find(block)?.groupValues?.getOrNull(1) ?: continue
+            val fullName = when {
+                rawName.startsWith(".") -> packageName + rawName
+                !rawName.contains(".") && packageName.isNotBlank() -> "$packageName.$rawName"
+                else -> rawName
+            }
+            val launcher = block.contains("android.intent.action.MAIN") &&
+                block.contains("android.intent.category.LAUNCHER")
+            activityNames.add(fullName)
+            if (launcher) launcherClassNames.add(fullName)
+            declarations.put(JSONObject().put("name",fullName).put("launcher",launcher))
+        }
+        val codeFiles = allFiles().filter {
+            it.extension.lowercase() in setOf("smali","java","kt") && it.length() <= 2*1024*1024
+        }.toList()
+        val resolved = JSONArray()
+        val referencedLayoutNames = linkedSetOf<String>()
+        val importantCodePaths = linkedSetOf<String>()
+        val namesToResolve = (launcherClassNames + activityNames).take(20)
+        for (className in namesToResolve) {
+            val classPath = className.replace('.','/').trimStart('/')
+            val matches = codeFiles.filter { file ->
+                val relative = file.relativeTo(project).invariantSeparatorsPath.removeSuffix("." + file.extension)
+                relative.endsWith(classPath,true) ||
+                    (file.extension.equals("smali",true) && relative.endsWith(classPath.replace('/','$'),true))
+            }.take(3)
+            for (file in matches) {
+                val relative = file.relativeTo(project).invariantSeparatorsPath
+                importantCodePaths.add(relative)
+                val source = runCatching { file.readText(Charsets.UTF_8) }.getOrDefault("")
+                val refs = Regex("R\\.layout\\.([A-Za-z0-9_]+)|R\\$layout;->([A-Za-z0-9_]+):I")
+                    .findAll(source).mapNotNull { it.groupValues.drop(1).firstOrNull { v -> v.isNotBlank() } }.toList()
+                refs.forEach { referencedLayoutNames.add(it) }
+                resolved.put(JSONObject().put("activity",className).put("path",relative)
+                    .put("launcher",launcherClassNames.contains(className))
+                    .put("referenced_layout_names",JSONArray(refs.distinct())))
+            }
+        }
+        // If Activity source has R.layout references, resolve those symbols to exact res/layout[-qualifier] XML files.
+        val layoutFiles = allTextFiles().filter { file ->
+            val path = file.relativeTo(project).invariantSeparatorsPath.lowercase()
+            path.startsWith("res/layout") && path.endsWith(".xml")
+        }.toList()
+        val layoutMatches = JSONArray()
+        for (file in layoutFiles) {
+            val base = file.nameWithoutExtension
+            val related = referencedLayoutNames.contains(base)
+            val hintMatch = hint.isNotBlank() && hint.lowercase().split(Regex("[^a-z0-9]+"))
+                .filter { it.length > 2 }.any { base.contains(it,true) }
+            if (related || hintMatch) {
+                layoutMatches.put(JSONObject().put("path",file.relativeTo(project).invariantSeparatorsPath)
+                    .put("resource_name",base).put("referenced_by_activity",related))
+            }
+        }
+        val themeFiles = allTextFiles().filter {
+            val path = it.relativeTo(project).invariantSeparatorsPath.lowercase()
+            path.startsWith("res/values") && path.endsWith(".xml") &&
+                listOf("color","style","theme","dimens","attr").any { word -> path.contains(word) }
+        }.take(100).map { it.relativeTo(project).invariantSeparatorsPath }
+        return JSONObject().put("manifest_found",manifestText.isNotBlank())
+            .put("package_name",packageName).put("declared_activities",declarations)
+            .put("resolved_activity_code",resolved).put("related_layout_files",layoutMatches)
+            .put("important_activity_paths",JSONArray(importantCodePaths))
+            .put("theme_resource_paths",JSONArray(themeFiles.toList()))
+            .put("note","Activity names came from the decoded manifest. Code paths and layout XML are included only when the exact name/reference could be resolved. For Smali layouts hidden behind numeric IDs, use search_project_files for setContentView, R$layout or resource IDs and inspect res/values/public.xml.")
+    }
 
     private fun guiCandidates(hint: String): JSONArray {
         val tokens = hint.lowercase().split(Regex("[^a-z0-9]+")).filter { it.length > 2 }
