@@ -76,6 +76,12 @@ internal class AgentProjectTools(context: Context, projectDirectory: File) {
         val path = args.optString("path","")
         return when {
             name == "delete_project_file" -> "Delete '$path'? A backup will be retained for rollback."
+            name == "apply_multi_file_patches" -> {
+                val patches = args.optJSONArray("patches") ?: JSONArray()
+                val manifestPath = (0 until patches.length()).mapNotNull { patches.optJSONObject(it)?.optString("path") }
+                    .firstOrNull { it.equals("AndroidManifest.xml",true) || it.contains("manifest",true) }
+                if (manifestPath != null) "The Agent wants to change manifest-related file '$manifestPath'. Review before applying." else null
+            }
             (name == "apply_file_patch" || name == "create_project_file") &&
                 path.equals("AndroidManifest.xml",true) ->
                 "The Agent wants to change AndroidManifest.xml. Review this change before applying it."
